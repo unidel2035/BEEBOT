@@ -124,12 +124,52 @@ class KnowledgeBase:
         with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
             self.chunks = json.load(f)
 
+    # Keyword → source name mapping for direct product queries
+    KEYWORD_SOURCES = {
+        "перга":         "pdf:Перга",
+        "пергу":         "pdf:Перга",
+        "пергой":        "pdf:Перга",
+        "гомогенат":     "pdf:Трутнёвый гомогенат",
+        "гомогената":    "pdf:Трутнёвый гомогенат",
+        "трутнёвый":     "pdf:Трутнёвый гомогенат",
+        "трутневый":     "pdf:Трутнёвый гомогенат",
+        "гемогенат":     "pdf:Трутнёвый гомогенат",
+        "успокоин":      "pdf:Настойка «Успокоин» (Травяная)",
+        "пжвм":          "pdf:Настойка ПЖВМ",
+        "огнёвка":       "pdf:Настойка ПЖВМ",
+        "огневка":       "pdf:Настойка ПЖВМ",
+        "подмор":        "pdf:Настойка Подмора пчелиного (на самогоне 40°)",
+        "подмора":       "pdf:Настойка Подмора пчелиного (на самогоне 40°)",
+        "прополис":      "pdf:Прополис_ сухой + настойка",
+        "прополиса":     "pdf:Прополис_ сухой + настойка",
+        "обножка":       "pdf:Пчелиная обножка",
+        "обножки":       "pdf:Пчелиная обножка",
+        "пыльца":        "pdf:Пчелиная обножка",
+        "антивирус":     "pdf:Антивирус",
+        "фитоэнергия":   "pdf:ФитоЭнергия",
+        "иммунитет":     "pdf:Иммунитет ребенка",
+    }
+
+    def _keyword_chunks(self, query: str, n: int = 2) -> list[dict]:
+        """Return top-n chunks from a product source if query contains a keyword."""
+        query_lower = query.lower()
+        for keyword, source in self.KEYWORD_SOURCES.items():
+            if keyword in query_lower:
+                matched = [c for c in self.chunks if c.get("source") == source]
+                # Return first n chunks from that source with boosted score
+                return [dict(c, score=1.0) for c in matched[:n]]
+        return []
+
     def search(self, query: str, top_k: int | None = None) -> list[dict]:
         """Search for the most relevant chunks given a query."""
         if self.index is None:
             self.load()
 
         top_k = top_k or MAX_CONTEXT_CHUNKS
+
+        # Keyword boost: if query names a product directly, pin its chunks first
+        keyword_results = self._keyword_chunks(query, n=2)
+        keyword_sources = {id(c) for c in keyword_results}
 
         # Encode query the same way
         sem_query = self.model.encode([query], normalize_embeddings=True)
@@ -144,16 +184,21 @@ class KnowledgeBase:
         ]).astype(np.float32)
         faiss.normalize_L2(combined_query)
 
-        scores, indices = self.index.search(combined_query, top_k)
+        scores, indices = self.index.search(combined_query, top_k * 2)
 
-        results = []
+        seen_texts = {c["text"] for c in keyword_results}
+        semantic_results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx >= 0:
                 chunk = self.chunks[idx].copy()
-                chunk["score"] = float(score)
-                results.append(chunk)
+                if chunk["text"] not in seen_texts:
+                    chunk["score"] = float(score)
+                    semantic_results.append(chunk)
+                    seen_texts.add(chunk["text"])
 
-        return results
+        # Keyword chunks first, then fill with semantic results
+        combined = keyword_results + semantic_results
+        return combined[:top_k]
 
 
 if __name__ == "__main__":

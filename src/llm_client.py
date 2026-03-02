@@ -4,7 +4,7 @@ import logging
 
 from groq import Groq
 
-from src.config import GROQ_API_KEY, GROQ_MODEL, MAX_RESPONSE_LENGTH
+from src.config import GROQ_API_KEY, GROQ_MODEL, GROQ_BASE_URL, MAX_RESPONSE_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ SYSTEM_PROMPT = """Ты — Александр Дмитров, пчеловод 
 - Конкретные практические советы с дозировками и рецептами
 
 Правила:
+- ВСЕГДА отвечай ТОЛЬКО на русском языке. Никогда не используй слова на других языках.
 - Отвечай на основе предоставленного контекста из своих видео и инструкций
 - Если информации в контексте недостаточно — честно скажи об этом
 - Не придумывай дозировки или рецепты, которых нет в контексте
@@ -49,7 +50,10 @@ class LLMClient:
     """Client for generating responses via Groq."""
 
     def __init__(self):
-        self.client = Groq(api_key=GROQ_API_KEY)
+        kwargs = {"api_key": GROQ_API_KEY}
+        if GROQ_BASE_URL:
+            kwargs["base_url"] = GROQ_BASE_URL
+        self.client = Groq(**kwargs)
         self.model = GROQ_MODEL
 
     def generate(self, query: str, context_chunks: list[dict]) -> str:
@@ -64,7 +68,7 @@ class LLMClient:
                     {"role": "user", "content": user_prompt},
                 ],
                 max_tokens=MAX_RESPONSE_LENGTH,
-                temperature=0.7,
+                temperature=0.5,
             )
             return response.choices[0].message.content
 

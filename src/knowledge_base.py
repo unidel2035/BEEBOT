@@ -17,6 +17,36 @@ from src.config import (
     MAX_CONTEXT_CHUNKS,
 )
 
+# Chunking strategy by source prefix
+_CHUNK_STRATEGIES = {
+    "pdf": dict(
+        chunk_size=900,
+        chunk_overlap=150,
+        separators=["\n\n", "\n", ". ", "! ", "? ", " "],
+    ),
+    "youtube": dict(
+        chunk_size=1200,
+        chunk_overlap=250,
+        separators=[". ", "! ", "? ", ", ", " "],
+    ),
+}
+_CHUNK_DEFAULT = dict(
+    chunk_size=900,
+    chunk_overlap=150,
+    separators=["\n\n", "\n", ". ", " "],
+)
+
+
+def _clean_youtube_text(text: str) -> str:
+    """Remove auto-generated captions artifacts from YouTube transcripts."""
+    # Remove repeated words/phrases (common in auto-subtitles)
+    text = re.sub(r'\b(\w{3,})\s+\1\b', r'\1', text, flags=re.IGNORECASE)
+    # Remove timestamp-like patterns
+    text = re.sub(r'\d{1,2}:\d{2}(:\d{2})?', '', text)
+    # Collapse whitespace
+    text = re.sub(r' {2,}', ' ', text)
+    return text.strip()
+
 
 class StyleAnalyzer:
     """Lightweight stylometric feature extractor."""
@@ -54,30 +84,41 @@ class KnowledgeBase:
         self.index: faiss.IndexFlatIP | None = None
         self.chunks: list[dict] = []
         self.semantic_dim = 0
-        self.style_dim = 5  # number of stylometric features
+        self.style_dim = 5
 
     def _load_model(self):
         if self.model is None:
             self.model = SentenceTransformer(EMBEDDING_MODEL)
             self.semantic_dim = self.model.get_sentence_embedding_dimension()
 
-    def build(self, documents: list[dict], chunk_size: int = 600, chunk_overlap: int = 100):
+    def _get_splitter(self, source: str) -> RecursiveCharacterTextSplitter:
+        """Return a splitter tuned for the source type (pdf / youtube)."""
+        prefix = source.split(":")[0] if ":" in source else ""
+        params = _CHUNK_STRATEGIES.get(prefix, _CHUNK_DEFAULT)
+        return RecursiveCharacterTextSplitter(**params)
+
+    def build(self, documents: list[dict]):
         """Build the index from a list of documents."""
         self._load_model()
 
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", ". ", " "],
-        )
-
         self.chunks = []
         for doc in documents:
-            text_chunks = splitter.split_text(doc["text"])
+            source = doc.get("source", "")
+            text = doc["text"]
+
+            # Pre-clean YouTube transcripts
+            if source.startswith("youtube:"):
+                text = _clean_youtube_text(text)
+
+            splitter = self._get_splitter(source)
+            text_chunks = splitter.split_text(text)
+
             for i, chunk_text in enumerate(text_chunks):
+                if len(chunk_text.strip()) < 40:
+                    continue
                 self.chunks.append({
                     "text": chunk_text,
-                    "source": doc["source"],
+                    "source": source,
                     "chunk_index": i,
                 })
 
@@ -102,7 +143,6 @@ class KnowledgeBase:
             style_vectors * 0.3,
         ]).astype(np.float32)
 
-        # Build FAISS index (inner product on normalized vectors)
         dim = combined.shape[1]
         self.index = faiss.IndexFlatIP(dim)
         faiss.normalize_L2(combined)
@@ -156,7 +196,6 @@ class KnowledgeBase:
         for keyword, source in self.KEYWORD_SOURCES.items():
             if keyword in query_lower:
                 matched = [c for c in self.chunks if c.get("source") == source]
-                # Return first n chunks from that source with boosted score
                 return [dict(c, score=1.0) for c in matched[:n]]
         return []
 
@@ -167,11 +206,8 @@ class KnowledgeBase:
 
         top_k = top_k or MAX_CONTEXT_CHUNKS
 
-        # Keyword boost: if query names a product directly, pin its chunks first
         keyword_results = self._keyword_chunks(query, n=2)
-        keyword_sources = {id(c) for c in keyword_results}
 
-        # Encode query the same way
         sem_query = self.model.encode([query], normalize_embeddings=True)
         style_query = self.style_analyzer.to_vector(query).reshape(1, -1)
         norm = np.linalg.norm(style_query)
@@ -196,7 +232,6 @@ class KnowledgeBase:
                     semantic_results.append(chunk)
                     seen_texts.add(chunk["text"])
 
-        # Keyword chunks first, then fill with semantic results
         combined = keyword_results + semantic_results
         return combined[:top_k]
 

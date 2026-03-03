@@ -33,7 +33,7 @@ WELCOME_MESSAGE = """Привет! Я бот-помощник Александр
 - Рецептах и дозировках
 - Пчеловодстве и здоровье
 
-Просто напиши свой вопрос!"""
+Просто напиши свой вопрос или выбери раздел ниже 👇"""
 
 HELP_MESSAGE = """Как пользоваться ботом:
 
@@ -52,7 +52,7 @@ HELP_MESSAGE = """Как пользоваться ботом:
 /help — эта справка
 /products — список продуктов с инструкциями"""
 
-PRODUCTS_MESSAGE = "Вот все продукты, по которым есть инструкции — нажми на любой, чтобы получить PDF:"
+PRODUCTS_MESSAGE = "Выбери продукт, чтобы получить PDF с инструкцией:"
 
 # Keywords that trigger the /products list
 _PRODUCTS_TRIGGERS = {
@@ -63,45 +63,78 @@ _PRODUCTS_TRIGGERS = {
 
 BOT_USERNAME = "AleksandrDmitrov_BEEBOT"
 
-# (kb_source_stem, display_name, pdf_filename)
-# Index in this list is used as callback_data to stay within 64-byte limit
+# (kb_source_stem, display_name, pdf_filename, category)
 INSTRUCTIONS = [
-    ("«УНИВЕРСАЛЬНАЯ_ПРОГРАММА_ОЗДОРОВЛЕНИЯ»", "Универсальная программа оздоровления",  "«УНИВЕРСАЛЬНАЯ_ПРОГРАММА_ОЗДОРОВЛЕНИЯ».pdf"),
-    ("Антивирус",                               "Настойка Антивирус",                    "Антивирус.pdf"),
-    ("Иммунитет ребенка",                       "Иммунитет ребёнка",                     "Иммунитет ребенка.pdf"),
-    ("Инструкция ТГ",                           "Инструкция ТГ",                         "Инструкция ТГ.pdf"),
-    ("Настойка «Успокоин» (Травяная)",          "Успокоин (травяная настойка)",          "Настойка «Успокоин» (Травяная).pdf"),
-    ("Настойка ПЖВМ",                           "Настойка ПЖВМ (огнёвка)",               "Настойка ПЖВМ.pdf"),
-    ("Настойка Подмора пчелиного (на самогоне 40°)", "Настойка подмора пчелиного",       "Настойка Подмора пчелиного (на самогоне 40°).pdf"),
-    ("Перга",                                   "Перга (пчелиный хлеб)",                 "Перга.pdf"),
-    ("Приложение к УПО (1)",                    "Приложение к УПО",                      "Приложение к УПО (1).pdf"),
-    ("Прополис_ сухой + настойка",              "Прополис (сухой + настойка)",           "Прополис_ сухой + настойка.pdf"),
-    ("Пчелиная обножка",                        "Пчелиная обножка (цветочная пыльца)",   "Пчелиная обножка.pdf"),
-    ("Трутнёвый гомогенат",                     "Трутнёвый гомогенат",                   "Трутнёвый гомогенат.pdf"),
-    ("ФитоЭнергия",                             "Настойка ФитоЭнергия",                  "ФитоЭнергия.pdf"),
+    # Продукты пчеловодства
+    ("Перга",                                   "Перга",                        "Перга.pdf",                                        "bee"),
+    ("Пчелиная обножка",                        "Обножка (пыльца)",             "Пчелиная обножка.pdf",                             "bee"),
+    ("Трутнёвый гомогенат",                     "Трутнёвый гомогенат",          "Трутнёвый гомогенат.pdf",                          "bee"),
+    # Настойки
+    ("Прополис_ сухой + настойка",              "Прополис",                     "Прополис_ сухой + настойка.pdf",                   "tincture"),
+    ("Настойка ПЖВМ",                           "ПЖВМ (огнёвка)",               "Настойка ПЖВМ.pdf",                                "tincture"),
+    ("Настойка Подмора пчелиного (на самогоне 40°)", "Подмор пчелиный",         "Настойка Подмора пчелиного (на самогоне 40°).pdf", "tincture"),
+    ("Настойка «Успокоин» (Травяная)",          "Успокоин",                     "Настойка «Успокоин» (Травяная).pdf",               "tincture"),
+    ("Антивирус",                               "Антивирус",                    "Антивирус.pdf",                                    "tincture"),
+    ("ФитоЭнергия",                             "ФитоЭнергия",                  "ФитоЭнергия.pdf",                                  "tincture"),
+    # Программы здоровья
+    ("«УНИВЕРСАЛЬНАЯ_ПРОГРАММА_ОЗДОРОВЛЕНИЯ»",  "Программа оздоровления (УПО)", "«УНИВЕРСАЛЬНАЯ_ПРОГРАММА_ОЗДОРОВЛЕНИЯ».pdf",       "program"),
+    ("Приложение к УПО (1)",                    "Приложение к УПО",             "Приложение к УПО (1).pdf",                         "program"),
+    ("Иммунитет ребенка",                       "Иммунитет ребёнка",            "Иммунитет ребенка.pdf",                            "program"),
+    ("Инструкция ТГ",                           "Инструкция ТГ",                "Инструкция ТГ.pdf",                                "program"),
 ]
 
 # Lookup: stem → (index, display_name, filename)
 _STEM_TO_INSTRUCTION = {
     stem: (i, name, fname)
-    for i, (stem, name, fname) in enumerate(INSTRUCTIONS)
+    for i, (stem, name, fname, _cat) in enumerate(INSTRUCTIONS)
+}
+
+_CATEGORY_LABELS = {
+    "bee":      "🍯 Продукты пчеловодства",
+    "tincture": "🌿 Настойки",
+    "program":  "📋 Программы здоровья",
 }
 
 
+def _build_start_keyboard() -> InlineKeyboardMarkup:
+    """Quick-start keyboard shown with /start."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📦 Все продукты", callback_data="show_products"),
+        InlineKeyboardButton(text="❓ Как пользоваться", callback_data="show_help"),
+    ]])
+
+
 def _build_products_keyboard() -> InlineKeyboardMarkup:
-    """Build a keyboard with all available instruction PDFs (2 buttons per row)."""
-    buttons = [
-        InlineKeyboardButton(text=f"📄 {name}", callback_data=f"doc:{i}")
-        for i, (stem, name, fname) in enumerate(INSTRUCTIONS)
-        if (BASE_DIR / fname).exists()
-    ]
-    # 2 per row
-    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    """Build a keyboard grouped by category (2 buttons per row)."""
+    rows = []
+    current_cat = None
+    cat_buttons = []
+
+    for i, (stem, name, fname, cat) in enumerate(INSTRUCTIONS):
+        if not (BASE_DIR / fname).exists():
+            continue
+        if cat != current_cat:
+            # Flush previous category buttons
+            if cat_buttons:
+                rows += [cat_buttons[j:j+2] for j in range(0, len(cat_buttons), 2)]
+            # Category header as disabled button
+            rows.append([InlineKeyboardButton(
+                text=_CATEGORY_LABELS.get(cat, cat),
+                callback_data="noop",
+            )])
+            cat_buttons = []
+            current_cat = cat
+        cat_buttons.append(InlineKeyboardButton(text=name, callback_data=f"doc:{i}"))
+
+    # Flush last category
+    if cat_buttons:
+        rows += [cat_buttons[j:j+2] for j in range(0, len(cat_buttons), 2)]
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _get_instruction_keyboard(chunks: list[dict]) -> InlineKeyboardMarkup | None:
-    """Find the most relevant instruction PDF and return an inline keyboard button."""
+    """Find the most relevant instruction PDF and return an inline keyboard."""
     stems = [
         chunk["source"][4:]  # strip "pdf:" prefix
         for chunk in chunks
@@ -109,7 +142,9 @@ def _get_instruction_keyboard(chunks: list[dict]) -> InlineKeyboardMarkup | None
         and chunk["source"][4:] in _STEM_TO_INSTRUCTION
     ]
     if not stems:
-        return None
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📦 Все продукты", callback_data="show_products"),
+        ]])
 
     top_stem = Counter(stems).most_common(1)[0][0]
     idx, name, filename = _STEM_TO_INSTRUCTION[top_stem]
@@ -118,13 +153,14 @@ def _get_instruction_keyboard(chunks: list[dict]) -> InlineKeyboardMarkup | None
         return None
 
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=f"📄 Инструкция: {name}", callback_data=f"doc:{idx}")
+        InlineKeyboardButton(text=f"📄 {name}", callback_data=f"doc:{idx}"),
+        InlineKeyboardButton(text="📦 Все продукты", callback_data="show_products"),
     ]])
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    await message.answer(WELCOME_MESSAGE)
+    await message.answer(WELCOME_MESSAGE, reply_markup=_build_start_keyboard())
 
 
 @dp.message(Command("help"))
@@ -137,27 +173,40 @@ async def cmd_products(message: types.Message):
     await message.answer(PRODUCTS_MESSAGE, reply_markup=_build_products_keyboard())
 
 
+@dp.callback_query(F.data == "show_products")
+async def cb_show_products(callback: types.CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(PRODUCTS_MESSAGE, reply_markup=_build_products_keyboard())
+
+
+@dp.callback_query(F.data == "show_help")
+async def cb_show_help(callback: types.CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(HELP_MESSAGE)
+
+
+@dp.callback_query(F.data == "noop")
+async def cb_noop(callback: types.CallbackQuery):
+    """Category header buttons do nothing."""
+    await callback.answer()
+
+
 def _should_respond(message: types.Message) -> bool:
     """Check if bot should respond to this message."""
-    # Always respond in private chats
     if message.chat.type == ChatType.PRIVATE:
         return True
-
-    # In groups: respond if mentioned or replied to
     text = message.text or ""
     if f"@{BOT_USERNAME}" in text:
         return True
     if message.reply_to_message and message.reply_to_message.from_user:
         if message.reply_to_message.from_user.id == bot.id:
             return True
-
     return False
 
 
 @dp.message()
 async def handle_question(message: types.Message):
     """Handle user questions: search KB → generate response via Groq."""
-    # Skip command messages — handled by dedicated handlers above
     if message.text and message.text.startswith("/"):
         return
 
@@ -169,23 +218,17 @@ async def handle_question(message: types.Message):
         await message.reply("Напиши вопрос подлиннее, чтобы я мог помочь.")
         return
 
-    # Detect "what products do you have" type queries
     query_lower = query.lower()
     if any(trigger in query_lower for trigger in _PRODUCTS_TRIGGERS):
         await message.reply(PRODUCTS_MESSAGE, reply_markup=_build_products_keyboard())
         return
 
     logger.info(f"Question from {message.from_user.id} in {message.chat.type}: {query}")
-
-    # Show typing indicator
     await bot.send_chat_action(message.chat.id, "typing")
 
     try:
-        # Search knowledge base
         chunks = kb.search(query)
         logger.info(f"Found {len(chunks)} relevant chunks")
-
-        # Generate response
         response = llm.generate(query, chunks)
         keyboard = _get_instruction_keyboard(chunks)
         await message.reply(response, reply_markup=keyboard)
@@ -202,7 +245,7 @@ async def send_instruction_pdf(callback: types.CallbackQuery):
     """Send the instruction PDF when user taps the button."""
     try:
         idx = int(callback.data.split(":")[1])
-        _, name, filename = INSTRUCTIONS[idx]
+        _, name, filename, _cat = INSTRUCTIONS[idx]
     except (ValueError, IndexError):
         await callback.answer("Инструкция не найдена.", show_alert=True)
         return
@@ -221,8 +264,6 @@ async def send_instruction_pdf(callback: types.CallbackQuery):
 
 async def main():
     logger.info("Starting BEEBOT...")
-
-    # Load knowledge base
     try:
         kb.load()
         logger.info(f"Knowledge base loaded: {len(kb.chunks)} chunks")
@@ -230,7 +271,6 @@ async def main():
         logger.error("Knowledge base not found! Run `python -m src.build_kb` first.")
         return
 
-    # Start polling
     logger.info("Bot is running!")
     await dp.start_polling(bot)
 

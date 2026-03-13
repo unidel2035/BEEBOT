@@ -43,6 +43,13 @@ BEEKEEPER_CHAT_ID: int | None = int(_beekeeper_raw) if _beekeeper_raw else None
 _admin_raw = os.getenv("ADMIN_CHAT_ID")
 ADMIN_CHAT_ID: int | None = int(_admin_raw) if _admin_raw else BEEKEEPER_CHAT_ID
 
+# Delivery (СДЭК + Почта России)
+CDEK_CLIENT_ID = os.getenv("CDEK_CLIENT_ID")
+CDEK_CLIENT_SECRET = os.getenv("CDEK_CLIENT_SECRET")
+POCHTA_TOKEN = os.getenv("POCHTA_TOKEN")
+POCHTA_KEY = os.getenv("POCHTA_KEY")
+SENDER_CITY = os.getenv("SENDER_CITY", "Москва")
+
 # Bot settings
 MAX_CONTEXT_CHUNKS = int(os.getenv("MAX_CONTEXT_CHUNKS", "5"))
 MAX_RESPONSE_LENGTH = int(os.getenv("MAX_RESPONSE_LENGTH", "4096"))

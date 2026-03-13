@@ -14,3 +14,19 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  beebot-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: beebot-web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

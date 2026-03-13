@@ -10,12 +10,12 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 
 from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR
 from src.agents.beebot import (
-    BeebotAgent,
     INSTRUCTIONS,
     CATEGORY_LABELS as _CATEGORY_LABELS,
     is_products_query,
     get_top_instruction,
 )
+from src.orchestrator import Orchestrator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-agent = BeebotAgent()
+orchestrator = Orchestrator()
 
 WELCOME_MESSAGE = """Привет! Я бот-помощник Александра Дмитрова — пчеловода и автора блога о продуктах пчеловодства.
 
@@ -217,7 +217,7 @@ async def handle_question(message: types.Message):
     await bot.send_chat_action(message.chat.id, "typing")
 
     try:
-        response, chunks = agent.answer(query)
+        response, chunks = await orchestrator.route(message.from_user.id, query)
         logger.info(f"Found {len(chunks)} relevant chunks")
         keyboard = _get_instruction_keyboard(chunks)
         await message.reply(response, reply_markup=keyboard)
@@ -259,8 +259,8 @@ async def send_instruction_pdf(callback: types.CallbackQuery):
 async def main():
     logger.info("Starting BEEBOT...")
     try:
-        agent.kb.load()
-        logger.info(f"Knowledge base loaded: {len(agent.kb.chunks)} chunks")
+        orchestrator.load_kb()
+        logger.info(f"Knowledge base loaded: {len(orchestrator._beebot.kb.chunks)} chunks")
     except FileNotFoundError:
         logger.error("Knowledge base not found! Run `python -m src.build_kb` first.")
         return

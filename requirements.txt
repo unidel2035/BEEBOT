@@ -3,6 +3,7 @@ aiogram==3.25.0
 
 # AI / LLM
 groq==1.0.0
+langgraph==0.3.21
 
 # Embeddings & Vector search
 sentence-transformers==5.2.3

@@ -142,56 +142,56 @@ class TestHandleQuestion:
 
     @pytest.mark.asyncio
     async def test_calls_kb_search(self):
-        """Handler should call agent.answer with the user's query."""
+        """Handler should call orchestrator.route with the user's query."""
         msg = self._make_message(text="Как принимать прополис?")
 
-        mock_agent = MagicMock()
-        mock_agent.answer.return_value = (
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.route = AsyncMock(return_value=(
             "Принимайте по 20 капель.",
             [{"text": "...", "source": "pdf:X", "score": 0.9}],
-        )
+        ))
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.agent", mock_agent),
+            patch("src.bot.orchestrator", mock_orchestrator),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 
-        mock_agent.answer.assert_called_once_with("Как принимать прополис?")
+        mock_orchestrator.route.assert_called_once_with(msg.from_user.id, "Как принимать прополис?")
 
     @pytest.mark.asyncio
     async def test_calls_llm_generate_with_chunks(self):
-        """Handler should call agent.answer and send the response."""
+        """Handler should call orchestrator.route and send the response."""
         chunks = [{"text": "Прополис...", "source": "pdf:X", "score": 0.9}]
         msg = self._make_message(text="Вопрос о прополисе")
 
-        mock_agent = MagicMock()
-        mock_agent.answer.return_value = ("ответ", chunks)
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.route = AsyncMock(return_value=("ответ", chunks))
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.agent", mock_agent),
+            patch("src.bot.orchestrator", mock_orchestrator),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 
-        mock_agent.answer.assert_called_once_with("Вопрос о прополисе")
+        mock_orchestrator.route.assert_called_once_with(msg.from_user.id, "Вопрос о прополисе")
 
     @pytest.mark.asyncio
     async def test_replies_with_llm_response(self):
-        """Handler should send agent response back to user."""
+        """Handler should send orchestrator response back to user."""
         expected_reply = "Настойку прополиса принимают по 30 капель."
         msg = self._make_message(text="Как принимать прополис?")
 
-        mock_agent = MagicMock()
-        mock_agent.answer.return_value = (expected_reply, [])
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.route = AsyncMock(return_value=(expected_reply, []))
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.agent", mock_agent),
+            patch("src.bot.orchestrator", mock_orchestrator),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
@@ -209,32 +209,32 @@ class TestHandleQuestion:
         )
         msg.reply_to_message = None
 
-        mock_agent = MagicMock()
-        mock_agent.answer.return_value = ("ответ", [])
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.route = AsyncMock(return_value=("ответ", []))
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.agent", mock_agent),
+            patch("src.bot.orchestrator", mock_orchestrator),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 
-        answer_call_arg = mock_agent.answer.call_args[0][0]
-        assert BOT_USERNAME not in answer_call_arg
-        assert "@" not in answer_call_arg
+        route_call_query = mock_orchestrator.route.call_args[0][1]
+        assert BOT_USERNAME not in route_call_query
+        assert "@" not in route_call_query
 
     @pytest.mark.asyncio
     async def test_error_handling_returns_fallback_message(self):
         """Handler should reply with a fallback message on unexpected errors."""
         msg = self._make_message(text="Вопрос")
 
-        mock_agent = MagicMock()
-        mock_agent.answer.side_effect = RuntimeError("Database error")
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.route = AsyncMock(side_effect=RuntimeError("Database error"))
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.agent", mock_agent),
+            patch("src.bot.orchestrator", mock_orchestrator),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()

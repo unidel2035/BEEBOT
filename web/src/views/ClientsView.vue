@@ -1,0 +1,92 @@
+<template>
+  <div>
+    <h2 class="text-2xl font-bold text-gray-800 mb-6">Клиенты</h2>
+
+    <div class="bg-white rounded-xl border border-gray-100 shadow-sm">
+      <DataTable
+        :value="clients"
+        :loading="loading"
+        paginator
+        :rows="25"
+        row-hover
+        filter-display="row"
+        :global-filter-fields="['full_name', 'phone', 'city']"
+        v-model:filters="filters"
+        class="text-sm"
+        @row-click="(e) => $router.push(`/clients/${e.data.id}`)"
+      >
+        <template #header>
+          <div class="flex justify-between items-center p-1">
+            <span class="text-base font-semibold text-gray-700">{{ clients.length }} клиентов</span>
+            <IconField>
+              <InputIcon class="pi pi-search" />
+              <InputText
+                v-model="searchQuery"
+                placeholder="Поиск по имени, телефону, городу"
+                class="w-64"
+              />
+            </IconField>
+          </div>
+        </template>
+        <template #empty>
+          <div class="text-center py-8 text-gray-400">Клиенты не найдены</div>
+        </template>
+        <Column field="full_name" header="ФИО" sortable />
+        <Column field="phone" header="Телефон">
+          <template #body="{ data }">{{ data.phone || '—' }}</template>
+        </Column>
+        <Column field="city" header="Город">
+          <template #body="{ data }">{{ data.city || '—' }}</template>
+        </Column>
+        <Column field="telegram_username" header="Telegram">
+          <template #body="{ data }">
+            <span v-if="data.telegram_username" class="text-blue-500">
+              @{{ data.telegram_username }}
+            </span>
+            <span v-else class="text-gray-300">—</span>
+          </template>
+        </Column>
+        <Column field="source" header="Источник">
+          <template #body="{ data }">
+            <Tag :value="data.source || 'Неизвестно'" severity="secondary" />
+          </template>
+        </Column>
+      </DataTable>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+import DataTable from 'primevue/datatable'
+import Column from 'primevue/column'
+import InputText from 'primevue/inputtext'
+import IconField from 'primevue/iconfield'
+import InputIcon from 'primevue/inputicon'
+import Tag from 'primevue/tag'
+import { getClients } from '../api.js'
+
+const loading = ref(true)
+const allClients = ref([])
+const searchQuery = ref('')
+const filters = ref({})
+
+const clients = computed(() => {
+  const q = searchQuery.value.toLowerCase()
+  if (!q) return allClients.value
+  return allClients.value.filter(
+    (c) =>
+      c.full_name?.toLowerCase().includes(q) ||
+      c.phone?.includes(q) ||
+      c.city?.toLowerCase().includes(q)
+  )
+})
+
+onMounted(async () => {
+  try {
+    allClients.value = await getClients()
+  } finally {
+    loading.value = false
+  }
+})
+</script>

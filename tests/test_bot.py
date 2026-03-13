@@ -142,68 +142,63 @@ class TestHandleQuestion:
 
     @pytest.mark.asyncio
     async def test_calls_kb_search(self):
-        """Handler should call knowledge base search with the user's query."""
+        """Handler should call agent.answer with the user's query."""
         msg = self._make_message(text="Как принимать прополис?")
 
-        mock_kb = MagicMock()
-        mock_kb.search.return_value = [{"text": "...", "source": "pdf:X", "score": 0.9}]
-        mock_llm = MagicMock()
-        mock_llm.generate.return_value = "Принимайте по 20 капель."
+        mock_agent = MagicMock()
+        mock_agent.answer.return_value = (
+            "Принимайте по 20 капель.",
+            [{"text": "...", "source": "pdf:X", "score": 0.9}],
+        )
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.kb", mock_kb),
-            patch("src.bot.llm", mock_llm),
+            patch("src.bot.agent", mock_agent),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 
-        mock_kb.search.assert_called_once_with("Как принимать прополис?")
+        mock_agent.answer.assert_called_once_with("Как принимать прополис?")
 
     @pytest.mark.asyncio
     async def test_calls_llm_generate_with_chunks(self):
-        """Handler should pass KB chunks to LLM generate."""
+        """Handler should call agent.answer and send the response."""
         chunks = [{"text": "Прополис...", "source": "pdf:X", "score": 0.9}]
         msg = self._make_message(text="Вопрос о прополисе")
 
-        mock_kb = MagicMock()
-        mock_kb.search.return_value = chunks
-        mock_llm = MagicMock()
-        mock_llm.generate.return_value = "ответ"
+        mock_agent = MagicMock()
+        mock_agent.answer.return_value = ("ответ", chunks)
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.kb", mock_kb),
-            patch("src.bot.llm", mock_llm),
+            patch("src.bot.agent", mock_agent),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 
-        mock_llm.generate.assert_called_once_with("Вопрос о прополисе", chunks)
+        mock_agent.answer.assert_called_once_with("Вопрос о прополисе")
 
     @pytest.mark.asyncio
     async def test_replies_with_llm_response(self):
-        """Handler should send LLM's response back to user."""
+        """Handler should send agent response back to user."""
         expected_reply = "Настойку прополиса принимают по 30 капель."
         msg = self._make_message(text="Как принимать прополис?")
 
-        mock_kb = MagicMock()
-        mock_kb.search.return_value = []
-        mock_llm = MagicMock()
-        mock_llm.generate.return_value = expected_reply
+        mock_agent = MagicMock()
+        mock_agent.answer.return_value = (expected_reply, [])
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.kb", mock_kb),
-            patch("src.bot.llm", mock_llm),
+            patch("src.bot.agent", mock_agent),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 
-        msg.reply.assert_called_once_with(expected_reply)
+        msg.reply.assert_called_once()
+        assert msg.reply.call_args[0][0] == expected_reply
 
     @pytest.mark.asyncio
     async def test_strips_bot_username_from_query(self):
@@ -214,35 +209,32 @@ class TestHandleQuestion:
         )
         msg.reply_to_message = None
 
-        mock_kb = MagicMock()
-        mock_kb.search.return_value = []
-        mock_llm = MagicMock()
-        mock_llm.generate.return_value = "ответ"
+        mock_agent = MagicMock()
+        mock_agent.answer.return_value = ("ответ", [])
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.kb", mock_kb),
-            patch("src.bot.llm", mock_llm),
+            patch("src.bot.agent", mock_agent),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 
-        search_call_arg = mock_kb.search.call_args[0][0]
-        assert BOT_USERNAME not in search_call_arg
-        assert "@" not in search_call_arg
+        answer_call_arg = mock_agent.answer.call_args[0][0]
+        assert BOT_USERNAME not in answer_call_arg
+        assert "@" not in answer_call_arg
 
     @pytest.mark.asyncio
     async def test_error_handling_returns_fallback_message(self):
         """Handler should reply with a fallback message on unexpected errors."""
         msg = self._make_message(text="Вопрос")
 
-        mock_kb = MagicMock()
-        mock_kb.search.side_effect = RuntimeError("Database error")
+        mock_agent = MagicMock()
+        mock_agent.answer.side_effect = RuntimeError("Database error")
 
         with (
             patch("src.bot._should_respond", return_value=True),
-            patch("src.bot.kb", mock_kb),
+            patch("src.bot.agent", mock_agent),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
@@ -270,7 +262,8 @@ class TestStartAndHelpCommands:
 
         await cmd_start(message)
 
-        message.answer.assert_called_once_with(WELCOME_MESSAGE)
+        message.answer.assert_called_once()
+        assert message.answer.call_args[0][0] == WELCOME_MESSAGE
 
     @pytest.mark.asyncio
     async def test_help_sends_help_message(self):
@@ -280,7 +273,8 @@ class TestStartAndHelpCommands:
 
         await cmd_help(message)
 
-        message.answer.assert_called_once_with(HELP_MESSAGE)
+        message.answer.assert_called_once()
+        assert message.answer.call_args[0][0] == HELP_MESSAGE
 
     def test_welcome_message_mentions_products(self):
         """WELCOME_MESSAGE should mention key bee products."""

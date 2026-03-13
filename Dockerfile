@@ -21,7 +21,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 COPY src/ src/
 COPY data/processed/ data/processed/
 
-# Copy PDF files for potential rebuilds
-COPY *.pdf ./
+# Copy PDF files (moved to data/pdfs/)
+COPY data/pdfs/ data/pdfs/
 
 CMD ["python", "-m", "src.bot"]

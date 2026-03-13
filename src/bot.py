@@ -2,16 +2,20 @@
 
 import asyncio
 import logging
-from collections import Counter
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatType
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
-from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR
-from src.knowledge_base import KnowledgeBase
-from src.llm_client import LLMClient
+from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR
+from src.agents.beebot import (
+    BeebotAgent,
+    INSTRUCTIONS,
+    CATEGORY_LABELS as _CATEGORY_LABELS,
+    is_products_query,
+    get_top_instruction,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,8 +26,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-kb = KnowledgeBase()
-llm = LLMClient()
+agent = BeebotAgent()
 
 WELCOME_MESSAGE = """Привет! Я бот-помощник Александра Дмитрова — пчеловода и автора блога о продуктах пчеловодства.
 
@@ -58,45 +61,7 @@ PRODUCTS_MESSAGE = "Выбери продукт, чтобы получить PDF
 
 VOICE_MESSAGE = "Голосовые сообщения пока не поддерживаю — напиши вопрос текстом, отвечу сразу 🙂"
 
-_PRODUCTS_TRIGGERS = {
-    "какие продукты", "список продуктов", "что есть", "что у тебя есть",
-    "какие настойки", "какие товары", "что продаёшь", "что продаешь",
-    "ассортимент", "что можно купить", "какие препараты",
-}
-
 BOT_USERNAME = "AleksandrDmitrov_BEEBOT"
-
-# (kb_source_stem, display_name, pdf_filename, category)
-INSTRUCTIONS = [
-    # Продукты пчеловодства
-    ("Перга",                                        "Перга",                        "Перга.pdf",                                        "bee"),
-    ("Пчелиная обножка",                             "Обножка (пыльца)",             "Пчелиная обножка.pdf",                             "bee"),
-    ("Трутнёвый гомогенат",                          "Трутнёвый гомогенат",          "Трутнёвый гомогенат.pdf",                          "bee"),
-    # Настойки
-    ("Прополис_ сухой + настойка",                   "Прополис",                     "Прополис_ сухой + настойка.pdf",                   "tincture"),
-    ("Настойка ПЖВМ",                                "ПЖВМ (огнёвка)",               "Настойка ПЖВМ.pdf",                                "tincture"),
-    ("Настойка Подмора пчелиного (на самогоне 40°)", "Подмор пчелиный",              "Настойка Подмора пчелиного (на самогоне 40°).pdf", "tincture"),
-    ("Настойка «Успокоин» (Травяная)",               "Успокоин",                     "Настойка «Успокоин» (Травяная).pdf",               "tincture"),
-    ("Антивирус",                                    "Антивирус",                    "Антивирус.pdf",                                    "tincture"),
-    ("ФитоЭнергия",                                  "ФитоЭнергия",                  "ФитоЭнергия.pdf",                                  "tincture"),
-    ("Настойка для ЖКТ",                             "Настойка для ЖКТ",             "Настойка для ЖКТ.pdf",                             "tincture"),
-    # Программы здоровья
-    ("«УНИВЕРСАЛЬНАЯ_ПРОГРАММА_ОЗДОРОВЛЕНИЯ»",       "Программа оздоровления (УПО)", "«УНИВЕРСАЛЬНАЯ_ПРОГРАММА_ОЗДОРОВЛЕНИЯ».pdf",       "program"),
-    ("Приложение к УПО (1)",                         "Приложение к УПО",             "Приложение к УПО (1).pdf",                         "program"),
-    ("Иммунитет ребенка",                            "Иммунитет ребёнка",            "Иммунитет ребенка.pdf",                            "program"),
-    ("Инструкция ТГ",                                "Инструкция ТГ",                "Инструкция ТГ.pdf",                                "program"),
-]
-
-_STEM_TO_INSTRUCTION = {
-    stem: (i, name, fname)
-    for i, (stem, name, fname, _cat) in enumerate(INSTRUCTIONS)
-}
-
-_CATEGORY_LABELS = {
-    "bee":      "🍯 Продукты пчеловодства",
-    "tincture": "🌿 Настойки",
-    "program":  "📋 Программы здоровья",
-}
 
 
 def _build_start_keyboard() -> InlineKeyboardMarkup:
@@ -118,7 +83,7 @@ def _build_products_keyboard() -> InlineKeyboardMarkup:
     cat_buttons = []
 
     for i, (stem, name, fname, cat) in enumerate(INSTRUCTIONS):
-        if not (BASE_DIR / fname).exists():
+        if not (PDFS_DIR / fname).exists():
             continue
         if cat != current_cat:
             if cat_buttons:
@@ -138,21 +103,14 @@ def _build_products_keyboard() -> InlineKeyboardMarkup:
 
 
 def _get_instruction_keyboard(chunks: list[dict]) -> InlineKeyboardMarkup:
-    stems = [
-        chunk["source"][4:]
-        for chunk in chunks
-        if chunk.get("source", "").startswith("pdf:")
-        and chunk["source"][4:] in _STEM_TO_INSTRUCTION
-    ]
-    if not stems:
+    result = get_top_instruction(chunks)
+    if result is None:
         return InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="📦 Все продукты", callback_data="show_products"),
         ]])
 
-    top_stem = Counter(stems).most_common(1)[0][0]
-    idx, name, filename = _STEM_TO_INSTRUCTION[top_stem]
-
-    if not (BASE_DIR / filename).exists():
+    idx, name, filename = result
+    if not (PDFS_DIR / filename).exists():
         return InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="📦 Все продукты", callback_data="show_products"),
         ]])
@@ -251,8 +209,7 @@ async def handle_question(message: types.Message):
         await message.reply("Напиши вопрос подлиннее, чтобы я мог помочь.")
         return
 
-    query_lower = query.lower()
-    if any(trigger in query_lower for trigger in _PRODUCTS_TRIGGERS):
+    if is_products_query(query):
         await message.reply(PRODUCTS_MESSAGE, reply_markup=_build_products_keyboard())
         return
 
@@ -260,9 +217,8 @@ async def handle_question(message: types.Message):
     await bot.send_chat_action(message.chat.id, "typing")
 
     try:
-        chunks = kb.search(query)
+        response, chunks = agent.answer(query)
         logger.info(f"Found {len(chunks)} relevant chunks")
-        response = llm.generate(query, chunks)
         keyboard = _get_instruction_keyboard(chunks)
         await message.reply(response, reply_markup=keyboard)
 
@@ -283,7 +239,7 @@ async def send_instruction_pdf(callback: types.CallbackQuery):
         await callback.answer("Инструкция не найдена.", show_alert=True)
         return
 
-    pdf_path = BASE_DIR / filename
+    pdf_path = PDFS_DIR / filename
     if not pdf_path.exists():
         await callback.answer("Файл не найден на сервере.", show_alert=True)
         return
@@ -303,8 +259,8 @@ async def send_instruction_pdf(callback: types.CallbackQuery):
 async def main():
     logger.info("Starting BEEBOT...")
     try:
-        kb.load()
-        logger.info(f"Knowledge base loaded: {len(kb.chunks)} chunks")
+        agent.kb.load()
+        logger.info(f"Knowledge base loaded: {len(agent.kb.chunks)} chunks")
     except FileNotFoundError:
         logger.error("Knowledge base not found! Run `python -m src.build_kb` first.")
         return

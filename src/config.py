@@ -22,6 +22,7 @@ EMBEDDING_MODEL = os.getenv(
 
 # Paths
 DATA_DIR = BASE_DIR / "data"
+PDFS_DIR = DATA_DIR / "pdfs"
 SUBTITLES_DIR = DATA_DIR / "subtitles"
 TEXTS_DIR = DATA_DIR / "texts"
 PROCESSED_DIR = DATA_DIR / "processed"

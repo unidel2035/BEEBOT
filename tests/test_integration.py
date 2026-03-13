@@ -217,17 +217,16 @@ class TestBotEndToEnd:
         return message
 
     @pytest.mark.asyncio
-    async def test_private_message_gets_reply(self, knowledge_base_from_docs):
+    async def test_private_message_gets_reply(self):
         """Private message should always get a reply."""
-        kb, _ = knowledge_base_from_docs
         msg = self._make_message("Чем полезна перга?", chat_type="private")
 
+        mock_agent = MagicMock()
+        mock_agent.answer.return_value = ("Перга богата белками и витаминами!", [])
         with (
-            patch("src.bot.kb", kb),
-            patch("src.bot.llm") as mock_llm,
+            patch("src.bot.agent", mock_agent),
             patch("src.bot.bot") as mock_bot,
         ):
-            mock_llm.generate.return_value = "Перга богата белками и витаминами!"
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 
@@ -243,20 +242,19 @@ class TestBotEndToEnd:
         msg.reply.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_group_mentioned_message_gets_reply(self, knowledge_base_from_docs):
+    async def test_group_mentioned_message_gets_reply(self):
         """Group message with @mention should get a reply."""
-        kb, _ = knowledge_base_from_docs
         msg = self._make_message(
             f"@{BOT_USERNAME} Как принимать прополис?",
             chat_type="group",
         )
 
+        mock_agent = MagicMock()
+        mock_agent.answer.return_value = ("Принимайте по 20 капель.", [])
         with (
-            patch("src.bot.kb", kb),
-            patch("src.bot.llm") as mock_llm,
+            patch("src.bot.agent", mock_agent),
             patch("src.bot.bot") as mock_bot,
         ):
-            mock_llm.generate.return_value = "Принимайте по 20 капель."
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg)
 

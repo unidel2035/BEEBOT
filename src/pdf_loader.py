@@ -3,7 +3,7 @@
 from pathlib import Path
 from PyPDF2 import PdfReader
 
-from src.config import BASE_DIR, TEXTS_DIR
+from src.config import BASE_DIR, PDFS_DIR, TEXTS_DIR
 
 
 def extract_pdf_text(pdf_path: Path) -> str:
@@ -14,8 +14,10 @@ def extract_pdf_text(pdf_path: Path) -> str:
 
 
 def process_all_pdfs(pdf_dir: Path | None = None) -> list[dict]:
-    """Extract text from all PDF files in the project root."""
-    pdf_dir = pdf_dir or BASE_DIR
+    """Extract text from all PDF files in data/pdfs/."""
+    if pdf_dir is None:
+        # Use data/pdfs/ if it exists and has PDFs, otherwise fall back to BASE_DIR
+        pdf_dir = PDFS_DIR if PDFS_DIR.exists() and list(PDFS_DIR.glob("*.pdf")) else BASE_DIR
     TEXTS_DIR.mkdir(parents=True, exist_ok=True)
 
     results = []

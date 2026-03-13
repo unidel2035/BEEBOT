@@ -33,6 +33,7 @@ from src.agents.logist import (
 )
 from src.orchestrator import Orchestrator
 from src.agents.analyst import AnalystAgent
+from src.admin import router as admin_router, setup_admin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,12 +44,18 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Админ-роутер регистрируется первым — его команды имеют приоритет
+dp.include_router(admin_router)
+
 orchestrator = Orchestrator()
 logist = LogistAgent(beekeeper_chat_id=BEEKEEPER_CHAT_ID)
 analyst = AnalystAgent(
     groq_client=orchestrator._groq,
     groq_model=orchestrator._model,
 )
+
+# Инициализировать админ-модуль
+setup_admin(bot)
 
 # Хранилище задач таймаута (user_id → asyncio.Task)
 _timeout_tasks: dict[int, asyncio.Task] = {}
@@ -79,7 +86,14 @@ HELP_MESSAGE = """Как пользоваться ботом:
 /ask — задать вопрос
 /help — эта справка
 /products — список продуктов с инструкциями
-/stats [запрос] — аналитика продаж (только для администратора)"""
+/order — оформить заказ
+/stats [запрос] — аналитика продаж (админ)
+/orders [статус] — список заказов (админ)
+/order <ID> — детали заказа (админ)
+/status <ID> <статус> — сменить статус (админ)
+/track <ID> <трек> — добавить трек-номер (админ)
+/clients — список клиентов (админ)
+/stock — каталог товаров (админ)"""
 
 ASK_MESSAGE = "Напишите свой вопрос — я отвечу на основе знаний о продуктах пчеловодства 🐝"
 

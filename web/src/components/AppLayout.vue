@@ -64,6 +64,7 @@ const auth = useAuthStore()
 
 const navItems = [
   { to: '/dashboard', icon: 'pi-chart-bar', label: 'Дашборд' },
+  { to: '/journal', icon: 'pi-calendar', label: 'Журнал по месяцам' },
   { to: '/orders', icon: 'pi-shopping-cart', label: 'Заказы' },
   { to: '/clients', icon: 'pi-users', label: 'Клиенты' },
   { to: '/products', icon: 'pi-box', label: 'Товары' },
@@ -71,7 +72,7 @@ const navItems = [
 ]
 
 function isActive(path) {
-  if (path === '/dashboard') return route.path === '/dashboard'
+  if (path === '/dashboard' || path === '/journal') return route.path === path
   return route.path.startsWith(path)
 }
 

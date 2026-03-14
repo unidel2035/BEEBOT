@@ -10,7 +10,7 @@
         :rows="25"
         row-hover
         filter-display="row"
-        :global-filter-fields="['full_name', 'phone', 'city']"
+        :global-filter-fields="['name', 'phone', 'city']"
         v-model:filters="filters"
         class="text-sm"
         @row-click="(e) => $router.push(`/clients/${e.data.id}`)"
@@ -31,7 +31,7 @@
         <template #empty>
           <div class="text-center py-8 text-gray-400">Клиенты не найдены</div>
         </template>
-        <Column field="full_name" header="ФИО" sortable />
+        <Column field="name" header="ФИО" sortable />
         <Column field="phone" header="Телефон">
           <template #body="{ data }">{{ data.phone || '—' }}</template>
         </Column>
@@ -76,7 +76,7 @@ const clients = computed(() => {
   if (!q) return allClients.value
   return allClients.value.filter(
     (c) =>
-      c.full_name?.toLowerCase().includes(q) ||
+      c.name?.toLowerCase().includes(q) ||
       c.phone?.includes(q) ||
       c.city?.toLowerCase().includes(q)
   )

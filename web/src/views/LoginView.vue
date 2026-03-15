@@ -22,13 +22,11 @@
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Пароль</label>
-          <Password
+          <InputText
             v-model="password"
+            type="password"
             placeholder="••••••••"
             class="w-full"
-            :feedback="false"
-            :toggle-mask="true"
-            input-class="w-full"
             :class="{ 'p-invalid': error }"
             autocomplete="current-password"
           />
@@ -52,7 +50,6 @@
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import InputText from 'primevue/inputtext'
-import Password from 'primevue/password'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import { useAuthStore } from '../stores/auth.js'

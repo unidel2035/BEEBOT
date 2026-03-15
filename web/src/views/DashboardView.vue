@@ -9,46 +9,46 @@
 
     <div v-else class="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
       <StatCard
-        icon="pi-shopping-cart"
+        icon="pi-list"
         icon-color="text-amber-600"
         bg-color="bg-amber-50"
-        label="Новых заказов сегодня"
-        :value="stats.new_orders_today"
-      />
-      <StatCard
-        icon="pi-calendar"
-        icon-color="text-blue-600"
-        bg-color="bg-blue-50"
-        label="Новых заказов за неделю"
-        :value="stats.new_orders_week"
-      />
-      <StatCard
-        icon="pi-wallet"
-        icon-color="text-green-600"
-        bg-color="bg-green-50"
-        label="Выручка сегодня"
-        :value="formatMoney(stats.revenue_today)"
-      />
-      <StatCard
-        icon="pi-chart-line"
-        icon-color="text-purple-600"
-        bg-color="bg-purple-50"
-        label="Выручка за неделю"
-        :value="formatMoney(stats.revenue_week)"
-      />
-      <StatCard
-        icon="pi-list"
-        icon-color="text-orange-600"
-        bg-color="bg-orange-50"
         label="Всего заказов"
         :value="stats.total_orders"
       />
       <StatCard
         icon="pi-users"
-        icon-color="text-teal-600"
-        bg-color="bg-teal-50"
+        icon-color="text-blue-600"
+        bg-color="bg-blue-50"
         label="Клиентов"
         :value="stats.total_clients"
+      />
+      <StatCard
+        icon="pi-wallet"
+        icon-color="text-green-600"
+        bg-color="bg-green-50"
+        label="Общая выручка"
+        :value="formatMoney(stats.total_revenue)"
+      />
+      <StatCard
+        icon="pi-chart-line"
+        icon-color="text-purple-600"
+        bg-color="bg-purple-50"
+        label="Средний чек"
+        :value="formatMoney(stats.avg_order)"
+      />
+      <StatCard
+        icon="pi-shopping-cart"
+        icon-color="text-orange-600"
+        bg-color="bg-orange-50"
+        label="Новых заказов"
+        :value="stats.new_orders"
+      />
+      <StatCard
+        icon="pi-truck"
+        icon-color="text-teal-600"
+        bg-color="bg-teal-50"
+        label="Доставленных"
+        :value="stats.delivered_orders"
       />
     </div>
 
@@ -102,12 +102,12 @@ import { formatDate, formatMoney } from '../utils.js'
 const loading = ref(true)
 const ordersLoading = ref(true)
 const stats = ref({
-  new_orders_today: 0,
-  new_orders_week: 0,
-  revenue_today: 0,
-  revenue_week: 0,
   total_orders: 0,
-  total_clients: 0
+  total_clients: 0,
+  total_revenue: 0,
+  avg_order: 0,
+  new_orders: 0,
+  delivered_orders: 0
 })
 const recentOrders = ref([])
 

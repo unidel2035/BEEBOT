@@ -528,7 +528,7 @@ async def fsm_enter_address(message: types.Message, state: FSMContext) -> None:
         address = data["prefill_address"]
 
     cart = data.get("cart", [])
-    options = await logist.get_delivery_options(cart)
+    options = await logist.get_delivery_options(cart, address=address)
 
     await state.update_data(address=address, delivery_options=options)
     await state.set_state(OrderFSM.choosing_delivery)

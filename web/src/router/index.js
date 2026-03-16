@@ -28,14 +28,14 @@ const routes = [
         component: () => import('../views/OrdersView.vue')
       },
       {
-        path: 'orders/:id',
-        name: 'OrderDetail',
-        component: () => import('../views/OrderDetailView.vue')
-      },
-      {
         path: 'orders/new',
         name: 'NewOrder',
         component: () => import('../views/NewOrderView.vue')
+      },
+      {
+        path: 'orders/:id',
+        name: 'OrderDetail',
+        component: () => import('../views/OrderDetailView.vue')
       },
       {
         path: 'clients',

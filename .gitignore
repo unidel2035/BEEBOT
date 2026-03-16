@@ -18,6 +18,18 @@ data/texts/
 data/processed/
 *.faiss
 
+# Frontend
+web/node_modules/
+web/dist/
+
+# Temporary files
+tmp/
+
+# Documents (not code)
+*.pdf
+*.xlsx
+*.csv
+
 # IDE
 .vscode/
 .idea/

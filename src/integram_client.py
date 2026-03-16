@@ -22,7 +22,6 @@ from src.integram_api import (
     TABLE_ORDERS,
     TABLE_CLIENTS,
     TABLE_PRODUCTS,
-    REQ_ORDER_DATE,
     REQ_ORDER_ADDRESS,
     REQ_ORDER_DELIVERY_COST,
     REQ_ORDER_ITEMS_TOTAL,
@@ -33,26 +32,46 @@ from src.integram_api import (
     REQ_ORDER_STATUS,
     REQ_ORDER_DELIVERY_METHOD,
     REQ_ORDER_SOURCE,
+    REQ_ORDER_MESSENGER,
     REQ_CLIENT_PHONE,
     REQ_CLIENT_TG_ID,
     REQ_CLIENT_TG_USER,
     REQ_CLIENT_ADDRESS,
     REQ_CLIENT_CITY,
     REQ_CLIENT_SOURCE,
-    REQ_PRODUCT_PRICE,
-    REQ_PRODUCT_WEIGHT,
-    REQ_PRODUCT_DESC,
-    REQ_PRODUCT_INSTOCK,
-    REQ_PRODUCT_SKU,
-    REQ_PRODUCT_CATEGORY,
-    _strip_html,
-    _extract_ref_text,
-    _extract_ref_id,
-    _parse_number,
 )
 from src.models import Client, Order, OrderItem, Product
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Справочники Integram (object ID → значение)
+# ---------------------------------------------------------------------------
+
+STATUS_IDS = {
+    "Новый": "1086",
+    "Подтверждён": "1087",
+    "В сборке": "1088",
+    "Отправлен": "1089",
+    "Доставлен": "1090",
+    "Отменён": "1091",
+}
+
+DELIVERY_IDS = {
+    "СДЭК": "1092",
+    "Почта России": "1093",
+    "Самовывоз": "1094",
+}
+
+SOURCE_IDS = {
+    "Telegram": "1082",
+    "UDS": "1083",
+    "WhatsApp": "1084",
+    "Ручной ввод": "1085",
+    "ВК": "3176",
+    "Instagram": "3177",
+}
 
 
 class IntegramError(Exception):
@@ -162,7 +181,7 @@ class IntegramClient:
         telegram_id: int,
         **kwargs: Any,
     ) -> Client:
-        """Получить клиента по Telegram ID или создать нового."""
+        """Получить клиента по Telegram ID / телефону или создать нового."""
         clients = await self.get_clients()
 
         # Поиск по telegram_id
@@ -174,32 +193,63 @@ class IntegramClient:
         # Поиск по телефону
         phone = kwargs.get("phone")
         if phone:
-            phone_digits = "".join(c for c in phone if c.isdigit())
+            phone_digits = "".join(ch for ch in phone if ch.isdigit())
             for c in clients:
                 if c.phone and "".join(ch for ch in c.phone if ch.isdigit()) == phone_digits:
                     return c
 
-        # Клиент не найден — создание пока не реализовано через API
-        # Возвращаем заглушку с переданными данными
-        logger.warning(
-            "Клиент telegram_id=%s не найден в CRM. "
-            "Создание через API пока не реализовано.",
-            telegram_id,
-        )
+        # Создать нового клиента
+        full_name = kwargs.get("full_name", f"Telegram {telegram_id}")
+        reqs: dict[str, str] = {}
+        if phone:
+            reqs[REQ_CLIENT_PHONE] = phone
+        if telegram_id:
+            reqs[REQ_CLIENT_TG_ID] = str(telegram_id)
+        if kwargs.get("telegram_username"):
+            reqs[REQ_CLIENT_TG_USER] = kwargs["telegram_username"]
+        if kwargs.get("address"):
+            reqs[REQ_CLIENT_ADDRESS] = kwargs["address"]
+        if kwargs.get("city"):
+            reqs[REQ_CLIENT_CITY] = kwargs["city"]
+        source = kwargs.get("source", "Telegram")
+        if source in SOURCE_IDS:
+            reqs[REQ_CLIENT_SOURCE] = SOURCE_IDS[source]
+
+        obj_id = await self._api.create_object(TABLE_CLIENTS, full_name, reqs)
+        logger.info("Создан клиент '%s' (id=%d) в Integram.", full_name, obj_id)
+
         return Client(
-            id=0,
-            full_name=kwargs.get("full_name", f"Telegram {telegram_id}"),
-            phone=kwargs.get("phone"),
+            id=obj_id,
+            full_name=full_name,
+            phone=phone,
             telegram_id=telegram_id or None,
             telegram_username=kwargs.get("telegram_username"),
             address=kwargs.get("address"),
             city=kwargs.get("city"),
-            source=kwargs.get("source"),
+            source=source,
         )
 
     async def update_client(self, client_id: int, **kwargs: Any) -> None:
-        """Обновить данные клиента (пока заглушка — логирует)."""
-        logger.info("update_client(%d, %s) — запись через API пока не реализована.", client_id, kwargs)
+        """Обновить данные клиента в Integram CRM."""
+        field_map = {
+            "full_name": None,  # val — обновляется отдельно
+            "phone": REQ_CLIENT_PHONE,
+            "telegram_id": REQ_CLIENT_TG_ID,
+            "telegram_username": REQ_CLIENT_TG_USER,
+            "address": REQ_CLIENT_ADDRESS,
+            "city": REQ_CLIENT_CITY,
+        }
+        reqs: dict[str, str] = {}
+        for py_key, req_id in field_map.items():
+            if py_key in kwargs and req_id:
+                reqs[req_id] = str(kwargs[py_key])
+        source = kwargs.get("source")
+        if source and source in SOURCE_IDS:
+            reqs[REQ_CLIENT_SOURCE] = SOURCE_IDS[source]
+
+        if reqs:
+            await self._api.set_requisites(client_id, TABLE_CLIENTS, reqs)
+            logger.info("Клиент %d обновлён: %s", client_id, list(kwargs.keys()))
 
     # ------------------------------------------------------------------
     # Заказы
@@ -236,28 +286,71 @@ class IntegramClient:
         items: list[dict],
         **kwargs: Any,
     ) -> Order:
-        """Создать заказ (пока заглушка — логирует и возвращает объект)."""
-        logger.info(
-            "create_order(client=%d, items=%d, %s) — запись через API пока не реализована.",
-            client_id, len(items), kwargs,
+        """Создать заказ в Integram CRM.
+
+        Args:
+            client_id:  ID клиента в Integram.
+            items:      Список позиций [{product_id, quantity, unit_price}].
+            **kwargs:   delivery_method, delivery_address, delivery_cost,
+                        items_total, total, source, number, status.
+        """
+        # Подсчёт сумм
+        items_total = kwargs.get("items_total") or sum(
+            i.get("quantity", 1) * i.get("unit_price", 0) for i in items
         )
+        delivery_cost = kwargs.get("delivery_cost", 0)
+        total = kwargs.get("total") or (items_total + delivery_cost)
+        number = kwargs.get("number", f"TG-{datetime.now().strftime('%Y%m%d-%H%M')}")
+        status = kwargs.get("status", "Новый")
+        source = kwargs.get("source", "Telegram")
+        delivery_method = kwargs.get("delivery_method", "")
+
+        # Собрать реквизиты
+        reqs: dict[str, str] = {}
+        if client_id:
+            reqs[REQ_ORDER_CLIENT] = str(client_id)
+        if status in STATUS_IDS:
+            reqs[REQ_ORDER_STATUS] = STATUS_IDS[status]
+        if delivery_method in DELIVERY_IDS:
+            reqs[REQ_ORDER_DELIVERY_METHOD] = DELIVERY_IDS[delivery_method]
+        if source in SOURCE_IDS:
+            reqs[REQ_ORDER_SOURCE] = SOURCE_IDS[source]
+        if kwargs.get("delivery_address"):
+            reqs[REQ_ORDER_ADDRESS] = kwargs["delivery_address"]
+        if delivery_cost:
+            reqs[REQ_ORDER_DELIVERY_COST] = str(delivery_cost)
+        reqs[REQ_ORDER_ITEMS_TOTAL] = str(items_total)
+        reqs[REQ_ORDER_TOTAL] = str(total)
+        if kwargs.get("messenger"):
+            reqs[REQ_ORDER_MESSENGER] = kwargs["messenger"]
+
+        obj_id = await self._api.create_object(TABLE_ORDERS, number, reqs)
+        logger.info("Создан заказ '%s' (id=%d) в Integram. Итого: %.0f ₽", number, obj_id, total)
+
         return Order(
-            id=0,
-            number=kwargs.get("number", "NEW"),
+            id=obj_id,
+            number=number,
             client_id=client_id,
             date=datetime.now(),
-            status=kwargs.get("status", "Новый"),
-            total=kwargs.get("total"),
-            source=kwargs.get("source"),
+            status=status,
+            delivery_method=delivery_method,
+            delivery_address=kwargs.get("delivery_address"),
+            delivery_cost=delivery_cost,
+            items_total=items_total,
+            total=total,
+            source=source,
             items=[],
         )
 
     async def update_order_status(self, order_id: int, status: str) -> None:
-        """Обновить статус заказа (пока заглушка — логирует)."""
-        logger.info(
-            "update_order_status(%d, '%s') — запись через API пока не реализована.",
-            order_id, status,
-        )
+        """Обновить статус заказа в Integram CRM."""
+        if status not in STATUS_IDS:
+            logger.warning("Неизвестный статус '%s'. Допустимые: %s", status, list(STATUS_IDS.keys()))
+            return
+        await self._api.set_requisites(order_id, TABLE_ORDERS, {
+            REQ_ORDER_STATUS: STATUS_IDS[status],
+        })
+        logger.info("Статус заказа %d обновлён → '%s'", order_id, status)
 
     async def add_order_item(self, order_id: int, product_id: int, qty: int) -> None:
         """Добавить позицию к заказу (пока заглушка)."""

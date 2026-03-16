@@ -206,6 +206,17 @@ class IntegramAPI:
             raise IntegramAPIError(f"Ошибка авторизации: {data}")
         self._token = data["token"]
         self._xsrf = data.get("_xsrf", "")
+
+        # Получить актуальный _xsrf токен
+        xsrf_resp = await http.get(
+            f"/{_DB}/xsrf?JSON",
+            cookies={_DB: self._token},
+        )
+        if xsrf_resp.status_code == 200:
+            xsrf_data = xsrf_resp.json()
+            self._xsrf = xsrf_data.get("_xsrf", self._xsrf)
+            self._token = xsrf_data.get("token", self._token)
+
         logger.info("Integram авторизация OK (user_id=%s)", data.get("id"))
 
     async def _get_table_page(
@@ -267,6 +278,91 @@ class IntegramAPI:
             pg += 1
 
         return all_objects
+
+    # ------------------------------------------------------------------
+    # Запись данных (create / update)
+    # ------------------------------------------------------------------
+
+    async def create_object(
+        self,
+        table_id: int,
+        value: str,
+        requisites: Optional[dict[str, str]] = None,
+    ) -> int:
+        """Создать объект в таблице. Возвращает ID нового объекта.
+
+        Использует endpoint _m_new/{typeId} с форматом t{id}=value.
+
+        Args:
+            table_id:    ID таблицы (например TABLE_ORDERS=1024).
+            value:       Название объекта (главное поле).
+            requisites:  Реквизиты {req_id: значение}. Для reference — ID объекта.
+        """
+        http = await self._get_http()
+        form: dict[str, str] = {
+            "_xsrf": self._xsrf or "",
+            f"t{table_id}": value,
+            "up": "1",
+        }
+        if requisites:
+            for req_id, val in requisites.items():
+                form[f"t{req_id}"] = str(val)
+
+        resp = await http.post(
+            f"/{_DB}/_m_new/{table_id}?JSON",
+            data=form,
+            cookies={_DB: self._token or ""},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        obj_id = data.get("obj") or data.get("id")
+        if not obj_id:
+            raise IntegramAPIError(f"Не удалось создать объект: {data}")
+        obj_id = int(obj_id)
+
+        logger.info("Integram: создан объект id=%d в таблице %d", obj_id, table_id)
+        return obj_id
+
+    async def set_requisites(
+        self,
+        obj_id: int,
+        table_id: int,
+        requisites: dict[str, str],
+    ) -> None:
+        """Обновить реквизиты объекта через _m_save/{objectId}.
+
+        Формат: t{typeId}=value, t{reqId}=reqValue.
+        """
+        http = await self._get_http()
+        cookies = {_DB: self._token or ""}
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+        # Получить текущее значение и тип объекта
+        edit_resp = await http.get(
+            f"/{_DB}/edit_obj/{obj_id}?JSON",
+            cookies=cookies,
+        )
+        edit_resp.raise_for_status()
+        edit_data = edit_resp.json()
+        obj_meta = edit_data.get("obj", {})
+        type_id = obj_meta.get("typ", str(table_id))
+        obj_val = obj_meta.get("val", "")
+
+        form: dict[str, str] = {
+            "_xsrf": self._xsrf or "",
+            f"t{type_id}": obj_val,
+        }
+        for req_id, val in requisites.items():
+            form[f"t{req_id}"] = str(val)
+
+        resp = await http.post(
+            f"/{_DB}/_m_save/{obj_id}?JSON",
+            data=form,
+            cookies=cookies,
+            headers=headers,
+        )
+        resp.raise_for_status()
 
     # ------------------------------------------------------------------
     # Высокоуровневые методы для веб-панели

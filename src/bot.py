@@ -19,6 +19,9 @@ from aiogram.types import (
 )
 
 from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID
+from src.integrations.uds import UDSClient, UDSPoller
+from src.integram_client import IntegramClient
+from src import config as app_config
 from src.agents.beebot import (
     INSTRUCTIONS,
     CATEGORY_LABELS as _CATEGORY_LABELS,
@@ -703,8 +706,40 @@ async def main():
         logger.error("Knowledge base not found! Run `python -m src.build_kb` first.")
         return
 
+    # --- UDS Poller: фоновая синхронизация заказов из UDS ---
+    uds_poller: Optional[UDSPoller] = None
+    uds_client: Optional[UDSClient] = None
+    integram_client: Optional[IntegramClient] = None
+
+    if app_config.UDS_API_KEY and app_config.UDS_COMPANY_ID:
+        try:
+            uds_client = UDSClient()
+            integram_client = IntegramClient()
+            await integram_client.authenticate()
+            uds_poller = UDSPoller(
+                uds_client=uds_client,
+                integram_client=integram_client,
+                bot=bot,
+                notify_chat_id=BEEKEEPER_CHAT_ID,
+            )
+            asyncio.create_task(uds_poller.run())
+            logger.info("UDS Poller запущен.")
+        except Exception as e:
+            logger.warning("UDS Poller не удалось запустить: %s", e)
+    else:
+        logger.info("UDS не настроен (UDS_API_KEY/UDS_COMPANY_ID не заданы) — поллер пропущен.")
+
     logger.info("Bot is running!")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # Graceful shutdown: остановить UDS poller и закрыть клиенты
+        if uds_poller:
+            uds_poller.stop()
+        if uds_client:
+            await uds_client.close()
+        if integram_client:
+            await integram_client.close()
 
 
 if __name__ == "__main__":

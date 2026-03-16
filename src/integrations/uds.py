@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -121,13 +122,16 @@ class UDSClient:
 
     async def _get_http(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
+            # UDS Partner API использует Basic Auth: companyId:apiKey
+            creds = base64.b64encode(
+                f"{self._company_id}:{self._api_key}".encode()
+            ).decode()
             self._http = httpx.AsyncClient(
                 base_url=self._base_url,
                 headers={
-                    "X-Origin-Request-Id": "beebot",
-                    "X-API-KEY": self._api_key,
+                    "Authorization": f"Basic {creds}",
+                    "Accept": "application/json",
                     "Accept-Language": "ru",
-                    "companyId": self._company_id,
                 },
                 timeout=30.0,
             )

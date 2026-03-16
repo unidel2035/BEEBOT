@@ -371,6 +371,46 @@ class IntegramAPI:
         )
         resp.raise_for_status()
 
+    async def delete_object(self, obj_id: int) -> None:
+        """Удалить объект по ID.
+
+        Использует endpoint _m_del/{objectId}?JSON.
+        """
+        http = await self._get_http()
+        resp = await http.post(
+            f"/{_DB}/_m_del/{obj_id}?JSON",
+            data={"_xsrf": self._xsrf or ""},
+            cookies={_DB: self._token or ""},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        logger.info("Integram: удалён объект id=%d", obj_id)
+
+    async def get_order_items(self, order_id: Optional[int] = None) -> list[dict[str, Any]]:
+        """Получить позиции заказов.
+
+        Args:
+            order_id: Если указан — только позиции этого заказа.
+        """
+        raw = await self.get_all_objects(TABLE_ORDER_ITEMS)
+        items = []
+        for obj in raw:
+            r = obj["reqs"]
+            ref_order_id = _extract_ref_id(r.get(REQ_ITEM_ORDER, ""))
+            if order_id and ref_order_id != order_id:
+                continue
+            items.append({
+                "id": obj["id"],
+                "name": obj["val"],
+                "order_id": ref_order_id,
+                "product_id": _extract_ref_id(r.get(REQ_ITEM_PRODUCT, "")),
+                "product_name": _extract_ref_text(r.get(REQ_ITEM_PRODUCT, "")),
+                "quantity": int(_parse_number(r.get(REQ_ITEM_QTY, "")) or 0),
+                "unit_price": _parse_number(r.get(REQ_ITEM_PRICE, "")) or 0,
+                "total": _parse_number(r.get(REQ_ITEM_SUM, "")) or 0,
+            })
+        return items
+
     # ------------------------------------------------------------------
     # Высокоуровневые методы для веб-панели
     # ------------------------------------------------------------------

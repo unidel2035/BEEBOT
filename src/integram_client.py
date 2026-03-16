@@ -376,12 +376,130 @@ class IntegramClient:
         })
         logger.info("Статус заказа %d обновлён → '%s'", order_id, status)
 
-    async def add_order_item(self, order_id: int, product_id: int, qty: int) -> None:
-        """Добавить позицию к заказу (пока заглушка)."""
-        logger.info(
-            "add_order_item(%d, product=%d, qty=%d) — не реализовано.",
-            order_id, product_id, qty,
+    # Статусы, в которых разрешено редактирование заказа
+    EDITABLE_STATUSES = {"Новый", "Подтверждён", "В сборке"}
+
+    async def update_order(self, order_id: int, **kwargs: Any) -> None:
+        """Обновить поля заказа (адрес, доставка, комментарий и т.д.).
+
+        Допустимые kwargs:
+            delivery_address, delivery_method, delivery_cost,
+            comment, items_total, total.
+        """
+        field_map = {
+            "delivery_address": REQ_ORDER_ADDRESS,
+            "delivery_cost": REQ_ORDER_DELIVERY_COST,
+            "items_total": REQ_ORDER_ITEMS_TOTAL,
+            "total": REQ_ORDER_TOTAL,
+            "comment": REQ_ORDER_COMMENT,
+            "tracking_number": REQ_ORDER_TRACKING,
+        }
+        reqs: dict[str, str] = {}
+        for py_key, req_id in field_map.items():
+            if py_key in kwargs:
+                reqs[req_id] = str(kwargs[py_key])
+
+        # Справочные поля (delivery_method, status, source)
+        if "delivery_method" in kwargs:
+            dm = kwargs["delivery_method"]
+            if dm in DELIVERY_IDS:
+                reqs[REQ_ORDER_DELIVERY_METHOD] = DELIVERY_IDS[dm]
+        if "status" in kwargs:
+            st = kwargs["status"]
+            if st in STATUS_IDS:
+                reqs[REQ_ORDER_STATUS] = STATUS_IDS[st]
+        if "source" in kwargs:
+            src = kwargs["source"]
+            if src in SOURCE_IDS:
+                reqs[REQ_ORDER_SOURCE] = SOURCE_IDS[src]
+
+        if reqs:
+            await self._api.set_requisites(order_id, TABLE_ORDERS, reqs)
+            logger.info("Заказ %d обновлён: %s", order_id, list(kwargs.keys()))
+
+    async def get_order_items(self, order_id: int) -> list[OrderItem]:
+        """Получить позиции заказа."""
+        raw = await self._api.get_order_items(order_id)
+        return [
+            OrderItem(
+                id=item["id"],
+                order_id=item["order_id"] or order_id,
+                product_id=item["product_id"] or 0,
+                product_name=item.get("product_name"),
+                quantity=item["quantity"],
+                unit_price=item["unit_price"],
+                total=item["total"],
+            )
+            for item in raw
+        ]
+
+    async def add_order_item(
+        self, order_id: int, product_id: int, qty: int, price: float,
+    ) -> int:
+        """Добавить позицию к заказу. Возвращает ID новой позиции."""
+        item_reqs = {
+            REQ_ITEM_ORDER: str(order_id),
+            REQ_ITEM_PRODUCT: str(product_id),
+            REQ_ITEM_QTY: str(qty),
+            REQ_ITEM_PRICE: str(price),
+            REQ_ITEM_SUM: str(qty * price),
+        }
+        item_id = await self._api.create_object(
+            TABLE_ORDER_ITEMS, f"Позиция заказа", item_reqs,
         )
+        logger.info(
+            "Добавлена позиция: order=%d, product=%d, qty=%d, sum=%.0f",
+            order_id, product_id, qty, qty * price,
+        )
+        return item_id
+
+    async def update_order_item(
+        self, item_id: int, qty: Optional[int] = None, price: Optional[float] = None,
+    ) -> None:
+        """Обновить количество/цену позиции заказа."""
+        reqs: dict[str, str] = {}
+        if qty is not None:
+            reqs[REQ_ITEM_QTY] = str(qty)
+        if price is not None:
+            reqs[REQ_ITEM_PRICE] = str(price)
+        if qty is not None and price is not None:
+            reqs[REQ_ITEM_SUM] = str(qty * price)
+        elif qty is not None:
+            # Нужна текущая цена для пересчёта суммы
+            pass  # будет пересчитано при recalculate
+        if reqs:
+            await self._api.set_requisites(item_id, TABLE_ORDER_ITEMS, reqs)
+            logger.info("Позиция %d обновлена: %s", item_id, reqs)
+
+    async def delete_order_item(self, item_id: int) -> None:
+        """Удалить позицию заказа."""
+        await self._api.delete_object(item_id)
+        logger.info("Позиция %d удалена", item_id)
+
+    async def recalculate_order_totals(self, order_id: int) -> dict:
+        """Пересчитать суммы заказа на основе позиций.
+
+        Returns:
+            {items_total, delivery_cost, total}
+        """
+        items = await self.get_order_items(order_id)
+        items_total = sum(i.quantity * i.unit_price for i in items)
+
+        # Получить текущую стоимость доставки
+        order = await self.get_order(order_id)
+        delivery_cost = order.delivery_cost or 0
+        total = items_total + delivery_cost
+
+        await self.update_order(
+            order_id,
+            items_total=items_total,
+            total=total,
+        )
+        return {
+            "items_total": items_total,
+            "delivery_cost": delivery_cost,
+            "total": total,
+        }
 
     # ------------------------------------------------------------------
     # Вспомогательные методы

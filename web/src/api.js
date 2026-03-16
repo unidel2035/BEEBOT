@@ -92,6 +92,35 @@ export async function updateOrderTracking(id, trackingNumber) {
   return data
 }
 
+export async function updateOrder(id, body) {
+  const { data } = await http.patch(`/orders/${id}`, body)
+  return data
+}
+
+// ---------------------------------------------------------------------------
+// Order Items
+// ---------------------------------------------------------------------------
+
+export async function getOrderItems(orderId) {
+  const { data } = await http.get(`/orders/${orderId}/items`)
+  return data
+}
+
+export async function addOrderItem(orderId, body) {
+  const { data } = await http.post(`/orders/${orderId}/items`, body)
+  return data
+}
+
+export async function updateOrderItem(orderId, itemId, body) {
+  const { data } = await http.patch(`/orders/${orderId}/items/${itemId}`, body)
+  return data
+}
+
+export async function deleteOrderItem(orderId, itemId) {
+  const { data } = await http.delete(`/orders/${orderId}/items/${itemId}`)
+  return data
+}
+
 // ---------------------------------------------------------------------------
 // Clients
 // ---------------------------------------------------------------------------

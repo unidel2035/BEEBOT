@@ -37,8 +37,20 @@ from src.integram_api import (
     IntegramAPIError,
     REQ_CLIENT_TG_ID,
     TABLE_ORDERS,
+    TABLE_ORDER_ITEMS,
     REQ_ORDER_STATUS,
     REQ_ORDER_TRACKING,
+    REQ_ORDER_ADDRESS,
+    REQ_ORDER_DELIVERY_COST,
+    REQ_ORDER_DELIVERY_METHOD,
+    REQ_ORDER_COMMENT,
+    REQ_ORDER_ITEMS_TOTAL,
+    REQ_ORDER_TOTAL,
+    REQ_ITEM_ORDER,
+    REQ_ITEM_PRODUCT,
+    REQ_ITEM_QTY,
+    REQ_ITEM_PRICE,
+    REQ_ITEM_SUM,
 )
 from src.web.notifications import notify_client_status_change, notify_client_tracking
 
@@ -244,13 +256,15 @@ async def get_order(
     order_id: int,
     _: str = Depends(_get_current_user),
 ) -> dict[str, Any]:
-    """Получить заказ по ID."""
+    """Получить заказ по ID с позициями."""
     try:
         integram = await _get_integram()
         try:
             orders = await integram.get_orders()
             for o in orders:
                 if o["id"] == order_id:
+                    o["items"] = await integram.get_order_items(order_id)
+                    o["editable"] = o.get("status") in EDITABLE_STATUSES
                     return o
             raise HTTPException(status_code=404, detail="Заказ не найден")
         finally:
@@ -273,12 +287,39 @@ STATUS_IDS = {
 }
 
 
+EDITABLE_STATUSES = {"Новый", "Подтверждён", "В сборке"}
+
+DELIVERY_METHOD_IDS = {
+    "СДЭК": "1092",
+    "Почта России": "1093",
+    "Самовывоз": "1094",
+}
+
+
 class StatusUpdate(BaseModel):
     status: str
 
 
 class TrackingUpdate(BaseModel):
     tracking_number: str
+
+
+class OrderUpdate(BaseModel):
+    delivery_address: Optional[str] = None
+    delivery_method: Optional[str] = None
+    delivery_cost: Optional[float] = None
+    comment: Optional[str] = None
+
+
+class ItemCreate(BaseModel):
+    product_id: int
+    quantity: int = 1
+    unit_price: float
+
+
+class ItemUpdate(BaseModel):
+    quantity: Optional[int] = None
+    unit_price: Optional[float] = None
 
 
 @app.patch("/api/orders/{order_id}/status", tags=["orders"])
@@ -354,6 +395,192 @@ async def update_order_tracking(
             await integram.close()
     except IntegramAPIError as exc:
         raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Редактирование заказа (до отправки)
+# ---------------------------------------------------------------------------
+
+
+async def _check_editable(integram: IntegramAPI, order_id: int) -> dict:
+    """Проверить, что заказ существует и доступен для редактирования."""
+    order = await _find_order(integram, order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    if order.get("status") not in EDITABLE_STATUSES:
+        raise HTTPException(
+            409,
+            f"Заказ в статусе «{order.get('status')}» нельзя редактировать",
+        )
+    return order
+
+
+@app.patch("/api/orders/{order_id}", tags=["orders"])
+async def update_order(
+    order_id: int,
+    body: OrderUpdate,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Обновить поля заказа (адрес, доставку, комментарий)."""
+    try:
+        integram = await _get_integram()
+        try:
+            await _check_editable(integram, order_id)
+
+            reqs: dict[str, str] = {}
+            if body.delivery_address is not None:
+                reqs[REQ_ORDER_ADDRESS] = body.delivery_address
+            if body.delivery_method is not None:
+                mid = DELIVERY_METHOD_IDS.get(body.delivery_method)
+                if not mid:
+                    raise HTTPException(400, f"Неизвестный способ доставки: {body.delivery_method}")
+                reqs[REQ_ORDER_DELIVERY_METHOD] = mid
+            if body.delivery_cost is not None:
+                reqs[REQ_ORDER_DELIVERY_COST] = str(body.delivery_cost)
+                # Пересчитать итого
+                order = await _find_order(integram, order_id)
+                items_total = order.get("items_total") or 0
+                reqs[REQ_ORDER_TOTAL] = str(items_total + body.delivery_cost)
+            if body.comment is not None:
+                reqs[REQ_ORDER_COMMENT] = body.comment
+
+            if reqs:
+                await integram.set_requisites(order_id, TABLE_ORDERS, reqs)
+
+            return {"ok": True, "order_id": order_id}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Позиции заказа
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/orders/{order_id}/items", tags=["order-items"])
+async def get_order_items(
+    order_id: int,
+    _: str = Depends(_get_current_user),
+) -> list[dict]:
+    """Получить позиции заказа."""
+    try:
+        integram = await _get_integram()
+        try:
+            return await integram.get_order_items(order_id)
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.post("/api/orders/{order_id}/items", tags=["order-items"])
+async def add_order_item(
+    order_id: int,
+    body: ItemCreate,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Добавить позицию к заказу."""
+    try:
+        integram = await _get_integram()
+        try:
+            await _check_editable(integram, order_id)
+
+            item_reqs = {
+                REQ_ITEM_ORDER: str(order_id),
+                REQ_ITEM_PRODUCT: str(body.product_id),
+                REQ_ITEM_QTY: str(body.quantity),
+                REQ_ITEM_PRICE: str(body.unit_price),
+                REQ_ITEM_SUM: str(body.quantity * body.unit_price),
+            }
+            item_id = await integram.create_object(
+                TABLE_ORDER_ITEMS, "Позиция заказа", item_reqs,
+            )
+
+            # Пересчитать итого заказа
+            await _recalculate_totals(integram, order_id)
+
+            return {"ok": True, "item_id": item_id}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.patch("/api/orders/{order_id}/items/{item_id}", tags=["order-items"])
+async def update_order_item(
+    order_id: int,
+    item_id: int,
+    body: ItemUpdate,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Изменить количество/цену позиции."""
+    try:
+        integram = await _get_integram()
+        try:
+            await _check_editable(integram, order_id)
+
+            # Получить текущую позицию для пересчёта суммы
+            items = await integram.get_order_items(order_id)
+            current = next((i for i in items if i["id"] == item_id), None)
+            if not current:
+                raise HTTPException(404, "Позиция не найдена")
+
+            qty = body.quantity if body.quantity is not None else current["quantity"]
+            price = body.unit_price if body.unit_price is not None else current["unit_price"]
+
+            reqs = {
+                REQ_ITEM_QTY: str(qty),
+                REQ_ITEM_PRICE: str(price),
+                REQ_ITEM_SUM: str(qty * price),
+            }
+            await integram.set_requisites(item_id, TABLE_ORDER_ITEMS, reqs)
+
+            await _recalculate_totals(integram, order_id)
+
+            return {"ok": True, "item_id": item_id}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.delete("/api/orders/{order_id}/items/{item_id}", tags=["order-items"])
+async def delete_order_item(
+    order_id: int,
+    item_id: int,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Удалить позицию из заказа."""
+    try:
+        integram = await _get_integram()
+        try:
+            await _check_editable(integram, order_id)
+
+            await integram.delete_object(item_id)
+            await _recalculate_totals(integram, order_id)
+
+            return {"ok": True, "item_id": item_id}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+async def _recalculate_totals(integram: IntegramAPI, order_id: int) -> None:
+    """Пересчитать суммы заказа на основе позиций."""
+    items = await integram.get_order_items(order_id)
+    items_total = sum(i["quantity"] * i["unit_price"] for i in items)
+
+    order = await _find_order(integram, order_id)
+    delivery_cost = (order.get("delivery_cost") or 0) if order else 0
+    total = items_total + delivery_cost
+
+    await integram.set_requisites(order_id, TABLE_ORDERS, {
+        REQ_ORDER_ITEMS_TOTAL: str(items_total),
+        REQ_ORDER_TOTAL: str(total),
+    })
 
 
 # ---------------------------------------------------------------------------

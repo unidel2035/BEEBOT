@@ -6,8 +6,10 @@
 Intents:
     consult  → BeebotAgent  — вопросы о продуктах пчеловодства
     order    → LogistAgent  — купить / заказать
-    delivery → LogistAgent  — доставка / трек-номер
+    edit     → (bot.py)     — изменить существующий заказ
+    track    → (bot.py)     — где мой заказ / трек-номер / статус
     stats    → AnalystAgent — статистика (только для пчеловода)
+    greeting → быстрый ответ без LLM
 """
 
 import logging
@@ -29,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Intent type
 # ---------------------------------------------------------------------------
 
-Intent = Literal["consult", "order", "delivery", "stats"]
+Intent = Literal["consult", "order", "edit", "track", "stats", "greeting"]
 
 # ---------------------------------------------------------------------------
 # Dialog state (per user)
@@ -61,17 +63,73 @@ class OrchestratorState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
+# Fast intent detection (без LLM)
+# ---------------------------------------------------------------------------
+
+_GREETING_WORDS = {
+    "привет", "здравствуйте", "здравствуй", "добрый день",
+    "доброе утро", "добрый вечер", "хай", "hi", "hello",
+    "приветствую", "здрасте",
+}
+
+_ORDER_WORDS = {
+    "заказать", "купить", "оформить заказ", "хочу заказать",
+    "хочу купить", "оформить", "сделать заказ",
+}
+
+_EDIT_WORDS = {
+    "изменить заказ", "поменять адрес", "добавить товар",
+    "убрать товар", "изменить количество", "поменять доставку",
+    "редактировать заказ", "изменить адрес", "дозаказ",
+    "добавить к заказу", "изменить заказ",
+}
+
+_TRACK_WORDS = {
+    "где мой заказ", "где заказ", "трек-номер", "трек номер",
+    "статус заказа", "отслеживание", "когда доставка",
+    "когда приедет", "мой заказ", "что с заказом",
+    "когда доставят",
+}
+
+
+def _fast_classify(query: str) -> Intent | None:
+    """Быстрая классификация по ключевым словам (без LLM)."""
+    q = query.lower().strip().rstrip("!?.")
+
+    # Точное совпадение для приветствий
+    if q in _GREETING_WORDS:
+        return "greeting"
+
+    # Фразовый поиск
+    for phrase in _EDIT_WORDS:
+        if phrase in q:
+            return "edit"
+    for phrase in _TRACK_WORDS:
+        if phrase in q:
+            return "track"
+    for phrase in _ORDER_WORDS:
+        if phrase in q:
+            return "order"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Intent classification prompt (short, ~100 tokens)
 # ---------------------------------------------------------------------------
 
 _INTENT_SYSTEM = (
     "Ты классификатор намерений. Определи intent одним словом из списка:\n"
-    "consult — вопрос о продуктах пчеловодства, здоровье, рецептах\n"
-    "order   — хочет купить, заказать, оформить заказ\n"
-    "delivery — вопрос о доставке, трек-номере, сроках\n"
-    "stats   — запрос статистики продаж или аналитики\n"
-    "Ответь ТОЛЬКО одним словом: consult, order, delivery или stats."
+    "consult  — вопрос о продуктах пчеловодства, здоровье, рецептах\n"
+    "order    — хочет купить, заказать, оформить новый заказ\n"
+    "edit     — хочет изменить существующий заказ (адрес, товары, доставку)\n"
+    "track    — спрашивает где заказ, трек-номер, статус доставки\n"
+    "stats    — запрос статистики продаж или аналитики\n"
+    "greeting — приветствие, здороваться\n"
+    "Ответь ТОЛЬКО одним словом: consult, order, edit, track, stats или greeting."
 )
+
+_VALID_INTENTS = {"consult", "order", "edit", "track", "stats", "greeting"}
 
 
 def _classify_intent(client: Groq, model: str, query: str) -> Intent:
@@ -87,7 +145,7 @@ def _classify_intent(client: Groq, model: str, query: str) -> Intent:
             temperature=0.0,
         )
         raw = resp.choices[0].message.content.strip().lower()
-        if raw in ("consult", "order", "delivery", "stats"):
+        if raw in _VALID_INTENTS:
             return raw  # type: ignore[return-value]
         logger.warning("Unexpected intent value '%s', falling back to consult", raw)
     except Exception as e:
@@ -174,6 +232,8 @@ class Orchestrator:
         graph.add_node("beebot", self._node_beebot)
         graph.add_node("logist", self._node_logist)
         graph.add_node("analyst", self._node_analyst)
+        graph.add_node("greeting", self._node_greeting)
+        graph.add_node("passthrough", self._node_passthrough)
 
         graph.set_entry_point("classify")
         graph.add_conditional_edges(
@@ -182,13 +242,17 @@ class Orchestrator:
             {
                 "consult": "beebot",
                 "order": "logist",
-                "delivery": "logist",
+                "edit": "passthrough",
+                "track": "passthrough",
                 "stats": "analyst",
+                "greeting": "greeting",
             },
         )
         graph.add_edge("beebot", END)
         graph.add_edge("logist", END)
         graph.add_edge("analyst", END)
+        graph.add_edge("greeting", END)
+        graph.add_edge("passthrough", END)
 
         return graph.compile()
 
@@ -197,12 +261,20 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _node_classify(self, state: OrchestratorState) -> OrchestratorState:
-        """Классифицировать intent запроса."""
-        intent = _classify_intent(self._groq, self._model, state["query"])
-        logger.info(
-            "Intent classified for user %d: '%s' → %s",
-            state["user_id"], state["query"][:60], intent,
-        )
+        """Классифицировать intent: сначала быстро, потом LLM."""
+        fast = _fast_classify(state["query"])
+        if fast:
+            intent = fast
+            logger.info(
+                "Intent (fast) for user %d: '%s' → %s",
+                state["user_id"], state["query"][:60], intent,
+            )
+        else:
+            intent = _classify_intent(self._groq, self._model, state["query"])
+            logger.info(
+                "Intent (LLM) for user %d: '%s' → %s",
+                state["user_id"], state["query"][:60], intent,
+            )
         return {**state, "intent": intent}
 
     def _node_beebot(self, state: OrchestratorState) -> OrchestratorState:
@@ -211,16 +283,9 @@ class Orchestrator:
         return {**state, "response": response, "chunks": chunks}
 
     async def _node_logist(self, state: OrchestratorState) -> OrchestratorState:
-        """Маршрут: order/delivery → Логист (заглушка)."""
-        try:
-            await self._logist.collect_shipping_info(state["user_id"])
-        except NotImplementedError:
-            pass
-        response = (
-            "Спасибо за интерес! Сейчас приём заказов ведётся вручную — "
-            "напишите Александру напрямую или оставьте заявку в чате."
-        )
-        return {**state, "response": response, "chunks": []}
+        """Маршрут: order → переход к FSM (обрабатывается в bot.py)."""
+        # Реальный FSM запускается в bot.py после проверки intent
+        return {**state, "response": "", "chunks": []}
 
     async def _node_analyst(self, state: OrchestratorState) -> OrchestratorState:
         """Маршрут: stats → Аналитик."""
@@ -231,13 +296,32 @@ class Orchestrator:
             response = "Не удалось получить статистику. Попробуйте позже."
         return {**state, "response": response, "chunks": []}
 
+    def _node_greeting(self, state: OrchestratorState) -> OrchestratorState:
+        """Маршрут: greeting → быстрый ответ."""
+        return {
+            **state,
+            "response": (
+                "Здравствуйте! Я бот-помощник Александра Дмитрова.\n\n"
+                "Задайте вопрос о продуктах пчеловодства, "
+                "или напишите /order чтобы оформить заказ."
+            ),
+            "chunks": [],
+        }
+
+    def _node_passthrough(self, state: OrchestratorState) -> OrchestratorState:
+        """Маршрут: edit/track → обрабатывается в bot.py."""
+        return {**state, "response": "", "chunks": []}
+
     # ------------------------------------------------------------------
     # Routing & state helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _route_by_intent(state: OrchestratorState) -> str:
-        return state["intent"] if state["intent"] in ("consult", "order", "delivery", "stats") else "consult"
+        intent = state["intent"]
+        if intent in _VALID_INTENTS:
+            return intent
+        return "consult"
 
     def _is_fresh(self, state: DialogState) -> bool:
         return (time.monotonic() - state["updated_at"]) < _DIALOG_TTL_SECONDS

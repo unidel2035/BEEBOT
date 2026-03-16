@@ -282,12 +282,21 @@ async def handle_question(message: types.Message, state: FSMContext):
 
     try:
         response, chunks = await orchestrator.route(message.from_user.id, query)
-        logger.info(f"Found {len(chunks)} relevant chunks")
-
-        # Если оркестратор определил intent «order» или «delivery» — запустить FSM
         intent = orchestrator.get_intent(message.from_user.id)
-        if intent in ("order", "delivery"):
+        logger.info(f"Intent: {intent}, chunks: {len(chunks)}")
+
+        # Маршрутизация по intent
+        if intent == "order":
             await cmd_order(message, state)
+            return
+        if intent == "track":
+            await _handle_track(message)
+            return
+        if intent == "edit":
+            await _handle_edit(message)
+            return
+        if intent == "greeting":
+            await message.reply(response)
             return
 
         keyboard = _get_instruction_keyboard(chunks)
@@ -298,6 +307,168 @@ async def handle_question(message: types.Message, state: FSMContext):
         await message.reply(
             "Извини, что-то пошло не так. Попробуй спросить ещё раз чуть позже."
         )
+
+
+# ===========================================================================
+# Обработчики intent: track (отслеживание) и edit (редактирование)
+# ===========================================================================
+
+
+async def _handle_track(message: types.Message) -> None:
+    """Показать заказы клиента с их статусами и трек-номерами."""
+    tg_id = message.from_user.id
+    try:
+        crm = logist._crm
+        if not crm:
+            await message.reply(
+                "Для отслеживания заказа напишите Александру — "
+                "он подскажет статус и трек-номер."
+            )
+            return
+
+        orders = await crm.get_orders(client_id=None)
+        # Найти клиента по telegram_id
+        clients = await crm.get_clients()
+        client = next((c for c in clients if c.telegram_id == tg_id), None)
+        if not client:
+            await message.reply(
+                "Не нашёл ваших заказов. Если вы оформляли заказ — "
+                "напишите Александру, он поможет."
+            )
+            return
+
+        my_orders = [o for o in orders if o.client_id == client.id]
+        if not my_orders:
+            await message.reply(
+                "У вас пока нет заказов. Напишите /order чтобы оформить."
+            )
+            return
+
+        # Формат: последние 5 заказов
+        lines = ["📦 *Ваши заказы:*\n"]
+        for o in my_orders[-5:]:
+            status_emoji = {
+                "Новый": "🆕", "Подтверждён": "✅", "В сборке": "📦",
+                "Отправлен": "🚚", "Доставлен": "🎉", "Отменён": "❌",
+            }.get(o.status, "❓")
+            line = f"{status_emoji} *#{o.number}* — {o.status}"
+            if o.tracking_number:
+                line += f"\n   Трек: `{o.tracking_number}`"
+            if o.total:
+                line += f" · {o.total:.0f} ₽"
+            lines.append(line)
+
+        lines.append("\nЕсли есть вопросы — напишите Александру.")
+        await message.reply("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error("Ошибка отслеживания: %s", e)
+        await message.reply(
+            "Не удалось загрузить информацию о заказах. Попробуйте позже."
+        )
+
+
+async def _handle_edit(message: types.Message) -> None:
+    """Показать редактируемые заказы клиента."""
+    tg_id = message.from_user.id
+    editable_statuses = {"Новый", "Подтверждён", "В сборке"}
+
+    try:
+        crm = logist._crm
+        if not crm:
+            await message.reply(
+                "Для изменения заказа напишите Александру — он внесёт правки."
+            )
+            return
+
+        clients = await crm.get_clients()
+        client = next((c for c in clients if c.telegram_id == tg_id), None)
+        if not client:
+            await message.reply("Не нашёл ваших заказов.")
+            return
+
+        orders = await crm.get_orders(client_id=None)
+        my_orders = [
+            o for o in orders
+            if o.client_id == client.id and o.status in editable_statuses
+        ]
+
+        if not my_orders:
+            await message.reply(
+                "Нет заказов, которые можно изменить.\n"
+                "Заказы доступны для редактирования в статусах: "
+                "Новый, Подтверждён, В сборке."
+            )
+            return
+
+        # Показать заказы с кнопками
+        lines = ["✏️ *Заказы, доступные для изменения:*\n"]
+        buttons = []
+        for o in my_orders[-5:]:
+            total_str = f" · {o.total:.0f} ₽" if o.total else ""
+            lines.append(f"• *#{o.number}* — {o.status}{total_str}")
+            buttons.append([InlineKeyboardButton(
+                text=f"Изменить #{o.number}",
+                callback_data=f"edit_order:{o.id}",
+            )])
+
+        lines.append(
+            "\nНажмите кнопку ниже или напишите Александру — "
+            "он поможет внести изменения."
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.reply("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error("Ошибка списка заказов для редактирования: %s", e)
+        await message.reply("Не удалось загрузить заказы. Попробуйте позже.")
+
+
+# ===========================================================================
+# Callback: редактирование заказа через Telegram
+# ===========================================================================
+
+
+@dp.callback_query(F.data.startswith("edit_order:"))
+async def cb_edit_order(callback: types.CallbackQuery):
+    """Показать опции редактирования конкретного заказа."""
+    order_id = int(callback.data.split(":")[1])
+    await callback.answer()
+
+    try:
+        crm = logist._crm
+        if not crm:
+            await callback.message.answer("CRM недоступна.")
+            return
+
+        order = await crm.get_order(order_id)
+        items = await crm.get_order_items(order_id)
+
+        lines = [f"📋 *Заказ #{order.number}*\n"]
+        if items:
+            lines.append("*Товары:*")
+            for item in items:
+                lines.append(f"  • {item.product_name or 'Товар'} × {item.quantity} = {item.total:.0f} ₽")
+        lines.append(f"\n🏠 Адрес: {order.delivery_address or '—'}")
+        lines.append(f"🚚 Доставка: {order.delivery_method or '—'}")
+        if order.delivery_cost:
+            lines.append(f"💰 Доставка: {order.delivery_cost:.0f} ₽")
+        lines.append(f"💰 *Итого: {order.total:.0f} ₽*")
+
+        lines.append(
+            "\nЧтобы внести изменения, напишите что хотите поменять, "
+            "например:\n"
+            "• «Поменяй адрес на г. Казань, ул. Мира 5»\n"
+            "• «Добавь ещё одну банку мёда»\n"
+            "\nАлександр обработает вашу просьбу."
+        )
+
+        await callback.message.answer("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error("Ошибка загрузки заказа %d: %s", order_id, e)
+        await callback.message.answer("Не удалось загрузить заказ.")
 
 
 # ===========================================================================

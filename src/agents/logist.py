@@ -106,26 +106,28 @@ async def calculate_delivery_cost(
     address: str,
     cart: list[dict],
 ) -> float:
-    """Рассчитать стоимость доставки.
+    """Рассчитать стоимость доставки через реальные API (СДЭК / Почта России).
 
-    Реальные API СДЭК и Почты России не интегрированы — используются
-    фиксированные тарифы. В будущем заменить на CDEKProvider / PochtaProvider.
+    При ошибке API — автоматический fallback на фиксированный тариф.
     """
-    # Расчёт суммарного веса (в граммах, конвертируем в кг)
+    if delivery_method == "Самовывоз":
+        return 0.0
+
     total_weight_g = sum(
         item.get("weight", 500) * item["qty"] for item in cart
     )
-    weight_kg = max(total_weight_g / 1000, 0.1)
 
-    if delivery_method == "Самовывоз":
-        return 0.0
-    elif delivery_method == "СДЭК":
-        # Базовый тариф СДЭК: 350 ₽ + 50 ₽/кг
-        return round(350 + 50 * weight_kg, 0)
-    elif delivery_method == "Почта России":
-        # Базовый тариф Почты России: 250 ₽ + 30 ₽/кг
-        return round(250 + 30 * weight_kg, 0)
-    else:
+    try:
+        from src.delivery.calculator import DeliveryCalculator
+        calc = DeliveryCalculator()
+        quote = await calc.calculate(
+            city=address,
+            weight_grams=total_weight_g,
+            method=delivery_method,
+        )
+        return quote.price
+    except Exception as e:
+        logger.warning("Ошибка расчёта доставки через API: %s", e)
         return 0.0
 
 
@@ -273,15 +275,21 @@ class LogistAgent:
     # Шаг 5: Расчёт стоимости доставки
     # ------------------------------------------------------------------
 
-    async def get_delivery_options(self, cart: list[dict]) -> list[dict]:
+    async def get_delivery_options(
+        self, cart: list[dict], address: str = "",
+    ) -> list[dict]:
         """Получить список способов доставки с расчётом стоимости.
+
+        Args:
+            cart: Корзина товаров.
+            address: Адрес доставки (для реального расчёта через API).
 
         Returns:
             Список dict: {method, cost, label}
         """
         options = []
         for method in DELIVERY_METHODS:
-            cost = await calculate_delivery_cost(method, "", cart)
+            cost = await calculate_delivery_cost(method, address, cart)
             if method == "Самовывоз":
                 label = "🏪 Самовывоз — бесплатно"
             else:

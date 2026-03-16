@@ -19,6 +19,9 @@ from aiogram.types import (
 )
 
 from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID
+from src.integrations.uds import UDSClient, UDSPoller
+from src.integram_client import IntegramClient
+from src import config as app_config
 from src.agents.beebot import (
     INSTRUCTIONS,
     CATEGORY_LABELS as _CATEGORY_LABELS,
@@ -54,7 +57,7 @@ analyst = AnalystAgent(
     groq_model=orchestrator._model,
 )
 
-# Инициализировать админ-модуль
+# Инициализировать админ-модуль (CRM подключается позже в main())
 setup_admin(bot)
 
 # Хранилище задач таймаута (user_id → asyncio.Task)
@@ -279,12 +282,21 @@ async def handle_question(message: types.Message, state: FSMContext):
 
     try:
         response, chunks = await orchestrator.route(message.from_user.id, query)
-        logger.info(f"Found {len(chunks)} relevant chunks")
-
-        # Если оркестратор определил intent «order» или «delivery» — запустить FSM
         intent = orchestrator.get_intent(message.from_user.id)
-        if intent in ("order", "delivery"):
+        logger.info(f"Intent: {intent}, chunks: {len(chunks)}")
+
+        # Маршрутизация по intent
+        if intent == "order":
             await cmd_order(message, state)
+            return
+        if intent == "track":
+            await _handle_track(message)
+            return
+        if intent == "edit":
+            await _handle_edit(message)
+            return
+        if intent == "greeting":
+            await message.reply(response)
             return
 
         keyboard = _get_instruction_keyboard(chunks)
@@ -295,6 +307,168 @@ async def handle_question(message: types.Message, state: FSMContext):
         await message.reply(
             "Извини, что-то пошло не так. Попробуй спросить ещё раз чуть позже."
         )
+
+
+# ===========================================================================
+# Обработчики intent: track (отслеживание) и edit (редактирование)
+# ===========================================================================
+
+
+async def _handle_track(message: types.Message) -> None:
+    """Показать заказы клиента с их статусами и трек-номерами."""
+    tg_id = message.from_user.id
+    try:
+        crm = logist._crm
+        if not crm:
+            await message.reply(
+                "Для отслеживания заказа напишите Александру — "
+                "он подскажет статус и трек-номер."
+            )
+            return
+
+        orders = await crm.get_orders(client_id=None)
+        # Найти клиента по telegram_id
+        clients = await crm.get_clients()
+        client = next((c for c in clients if c.telegram_id == tg_id), None)
+        if not client:
+            await message.reply(
+                "Не нашёл ваших заказов. Если вы оформляли заказ — "
+                "напишите Александру, он поможет."
+            )
+            return
+
+        my_orders = [o for o in orders if o.client_id == client.id]
+        if not my_orders:
+            await message.reply(
+                "У вас пока нет заказов. Напишите /order чтобы оформить."
+            )
+            return
+
+        # Формат: последние 5 заказов
+        lines = ["📦 *Ваши заказы:*\n"]
+        for o in my_orders[-5:]:
+            status_emoji = {
+                "Новый": "🆕", "Подтверждён": "✅", "В сборке": "📦",
+                "Отправлен": "🚚", "Доставлен": "🎉", "Отменён": "❌",
+            }.get(o.status, "❓")
+            line = f"{status_emoji} *#{o.number}* — {o.status}"
+            if o.tracking_number:
+                line += f"\n   Трек: `{o.tracking_number}`"
+            if o.total:
+                line += f" · {o.total:.0f} ₽"
+            lines.append(line)
+
+        lines.append("\nЕсли есть вопросы — напишите Александру.")
+        await message.reply("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error("Ошибка отслеживания: %s", e)
+        await message.reply(
+            "Не удалось загрузить информацию о заказах. Попробуйте позже."
+        )
+
+
+async def _handle_edit(message: types.Message) -> None:
+    """Показать редактируемые заказы клиента."""
+    tg_id = message.from_user.id
+    editable_statuses = {"Новый", "Подтверждён", "В сборке"}
+
+    try:
+        crm = logist._crm
+        if not crm:
+            await message.reply(
+                "Для изменения заказа напишите Александру — он внесёт правки."
+            )
+            return
+
+        clients = await crm.get_clients()
+        client = next((c for c in clients if c.telegram_id == tg_id), None)
+        if not client:
+            await message.reply("Не нашёл ваших заказов.")
+            return
+
+        orders = await crm.get_orders(client_id=None)
+        my_orders = [
+            o for o in orders
+            if o.client_id == client.id and o.status in editable_statuses
+        ]
+
+        if not my_orders:
+            await message.reply(
+                "Нет заказов, которые можно изменить.\n"
+                "Заказы доступны для редактирования в статусах: "
+                "Новый, Подтверждён, В сборке."
+            )
+            return
+
+        # Показать заказы с кнопками
+        lines = ["✏️ *Заказы, доступные для изменения:*\n"]
+        buttons = []
+        for o in my_orders[-5:]:
+            total_str = f" · {o.total:.0f} ₽" if o.total else ""
+            lines.append(f"• *#{o.number}* — {o.status}{total_str}")
+            buttons.append([InlineKeyboardButton(
+                text=f"Изменить #{o.number}",
+                callback_data=f"edit_order:{o.id}",
+            )])
+
+        lines.append(
+            "\nНажмите кнопку ниже или напишите Александру — "
+            "он поможет внести изменения."
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.reply("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error("Ошибка списка заказов для редактирования: %s", e)
+        await message.reply("Не удалось загрузить заказы. Попробуйте позже.")
+
+
+# ===========================================================================
+# Callback: редактирование заказа через Telegram
+# ===========================================================================
+
+
+@dp.callback_query(F.data.startswith("edit_order:"))
+async def cb_edit_order(callback: types.CallbackQuery):
+    """Показать опции редактирования конкретного заказа."""
+    order_id = int(callback.data.split(":")[1])
+    await callback.answer()
+
+    try:
+        crm = logist._crm
+        if not crm:
+            await callback.message.answer("CRM недоступна.")
+            return
+
+        order = await crm.get_order(order_id)
+        items = await crm.get_order_items(order_id)
+
+        lines = [f"📋 *Заказ #{order.number}*\n"]
+        if items:
+            lines.append("*Товары:*")
+            for item in items:
+                lines.append(f"  • {item.product_name or 'Товар'} × {item.quantity} = {item.total:.0f} ₽")
+        lines.append(f"\n🏠 Адрес: {order.delivery_address or '—'}")
+        lines.append(f"🚚 Доставка: {order.delivery_method or '—'}")
+        if order.delivery_cost:
+            lines.append(f"💰 Доставка: {order.delivery_cost:.0f} ₽")
+        lines.append(f"💰 *Итого: {order.total:.0f} ₽*")
+
+        lines.append(
+            "\nЧтобы внести изменения, напишите что хотите поменять, "
+            "например:\n"
+            "• «Поменяй адрес на г. Казань, ул. Мира 5»\n"
+            "• «Добавь ещё одну банку мёда»\n"
+            "\nАлександр обработает вашу просьбу."
+        )
+
+        await callback.message.answer("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error("Ошибка загрузки заказа %d: %s", order_id, e)
+        await callback.message.answer("Не удалось загрузить заказ.")
 
 
 # ===========================================================================
@@ -430,8 +604,11 @@ async def fsm_choose_product(message: types.Message, state: FSMContext) -> None:
 
     prefill = ""
     if existing_client and existing_client.full_name:
-        prefill = f"\nПодсказка: в прошлый раз вы представились как *{existing_client.full_name}*.\nПросто отправьте его или введите другое."
-        await state.update_data(prefill_name=existing_client.full_name)
+        name = existing_client.full_name
+        # Не предлагать автоподстановку если имя = "Telegram XXXXX"
+        if not name.startswith("Telegram "):
+            prefill = f"\nПодсказка: в прошлый раз вы представились как *{name}*.\nПросто отправьте *да* или введите другое."
+            await state.update_data(prefill_name=name)
 
     await state.set_state(OrderFSM.entering_name)
     _reset_timeout(user_id, message.chat.id, state)
@@ -522,7 +699,7 @@ async def fsm_enter_address(message: types.Message, state: FSMContext) -> None:
         address = data["prefill_address"]
 
     cart = data.get("cart", [])
-    options = await logist.get_delivery_options(cart)
+    options = await logist.get_delivery_options(cart, address=address)
 
     await state.update_data(address=address, delivery_options=options)
     await state.set_state(OrderFSM.choosing_delivery)
@@ -703,8 +880,56 @@ async def main():
         logger.error("Knowledge base not found! Run `python -m src.build_kb` first.")
         return
 
+    # --- Integram CRM: общий клиент для всех агентов ---
+    integram_client: Optional[IntegramClient] = None
+    if app_config.INTEGRAM_URL and app_config.INTEGRAM_LOGIN:
+        try:
+            integram_client = IntegramClient()
+            await integram_client.authenticate()
+            # Передать CRM-клиент всем агентам
+            logist._crm = integram_client
+            analyst._crm = integram_client
+            setup_admin(bot, crm=integram_client)
+            logger.info("Integram CRM подключена — агенты получили доступ к данным.")
+        except Exception as e:
+            logger.warning("Integram CRM недоступна: %s — агенты работают без CRM.", e)
+    else:
+        logger.info("Integram CRM не настроена — агенты работают без CRM.")
+
+    # --- UDS Poller: фоновая синхронизация заказов из UDS ---
+    uds_poller: Optional[UDSPoller] = None
+    uds_client: Optional[UDSClient] = None
+
+    if app_config.UDS_API_KEY and app_config.UDS_COMPANY_ID:
+        if integram_client:
+            try:
+                uds_client = UDSClient()
+                uds_poller = UDSPoller(
+                    uds_client=uds_client,
+                    integram_client=integram_client,
+                    bot=bot,
+                    notify_chat_id=BEEKEEPER_CHAT_ID,
+                )
+                asyncio.create_task(uds_poller.run())
+                logger.info("UDS Poller запущен.")
+            except Exception as e:
+                logger.warning("UDS Poller не удалось запустить: %s", e)
+        else:
+            logger.warning("UDS Poller пропущен — Integram CRM не подключена.")
+    else:
+        logger.info("UDS не настроен (UDS_API_KEY/UDS_COMPANY_ID не заданы) — поллер пропущен.")
+
     logger.info("Bot is running!")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # Graceful shutdown: остановить UDS poller и закрыть клиенты
+        if uds_poller:
+            uds_poller.stop()
+        if uds_client:
+            await uds_client.close()
+        if integram_client:
+            await integram_client.close()
 
 
 if __name__ == "__main__":

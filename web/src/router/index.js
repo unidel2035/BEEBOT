@@ -56,6 +56,16 @@ const routes = [
         path: 'journal',
         name: 'Journal',
         component: () => import('../views/MonthlyOrdersView.vue')
+      },
+      {
+        path: 'packing',
+        name: 'Packing',
+        component: () => import('../views/PackingView.vue')
+      },
+      {
+        path: 'stock',
+        name: 'Stock',
+        component: () => import('../views/StockView.vue')
       }
     ]
   },

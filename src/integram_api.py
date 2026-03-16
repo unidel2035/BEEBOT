@@ -16,22 +16,23 @@ Integram использует собственный REST-подобный API:
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any, Optional
 
 import httpx
 
+from src import config
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Конфигурация
+# Конфигурация (из src.config, который загружает .env)
 # ---------------------------------------------------------------------------
 
-_BASE_URL = os.getenv("INTEGRAM_URL", "https://ai2o.ru").rstrip("/")
-_DB = os.getenv("INTEGRAM_DB", "bibot")
-_LOGIN = os.getenv("INTEGRAM_LOGIN", "bibot")
-_PASSWORD = os.getenv("INTEGRAM_PASSWORD", "")
+_BASE_URL = (config.INTEGRAM_URL or "https://ai2o.ru").rstrip("/")
+_DB = config.INTEGRAM_DB or "bibot"
+_LOGIN = config.INTEGRAM_LOGIN or "bibot"
+_PASSWORD = config.INTEGRAM_PASSWORD or ""
 
 # ---------------------------------------------------------------------------
 # ID таблиц и реквизитов (из CRM-схемы)
@@ -69,6 +70,13 @@ REQ_CLIENT_CITY = "1044"
 REQ_CLIENT_COMMENT = "1046"
 REQ_CLIENT_SOURCE = "1069"
 
+# Реквизиты позиций заказа
+REQ_ITEM_QTY = "1061"
+REQ_ITEM_PRICE = "1063"
+REQ_ITEM_SUM = "1065"
+REQ_ITEM_PRODUCT = "1078"
+REQ_ITEM_ORDER = "1154"
+
 # Реквизиты товаров
 REQ_PRODUCT_PRICE = "1027"
 REQ_PRODUCT_WEIGHT = "1029"
@@ -77,6 +85,7 @@ REQ_PRODUCT_INSTOCK = "1033"
 REQ_PRODUCT_SKU = "1035"
 REQ_PRODUCT_CATEGORY = "1067"
 REQ_PRODUCT_SHORT = "1173"
+REQ_PRODUCT_STOCK = "4850"
 
 
 class IntegramAPIError(Exception):
@@ -205,6 +214,17 @@ class IntegramAPI:
             raise IntegramAPIError(f"Ошибка авторизации: {data}")
         self._token = data["token"]
         self._xsrf = data.get("_xsrf", "")
+
+        # Получить актуальный _xsrf токен
+        xsrf_resp = await http.get(
+            f"/{_DB}/xsrf?JSON",
+            cookies={_DB: self._token},
+        )
+        if xsrf_resp.status_code == 200:
+            xsrf_data = xsrf_resp.json()
+            self._xsrf = xsrf_data.get("_xsrf", self._xsrf)
+            self._token = xsrf_data.get("token", self._token)
+
         logger.info("Integram авторизация OK (user_id=%s)", data.get("id"))
 
     async def _get_table_page(
@@ -266,6 +286,147 @@ class IntegramAPI:
             pg += 1
 
         return all_objects
+
+    # ------------------------------------------------------------------
+    # Запись данных (create / update)
+    # ------------------------------------------------------------------
+
+    async def create_object(
+        self,
+        table_id: int,
+        value: str,
+        requisites: Optional[dict[str, str]] = None,
+    ) -> int:
+        """Создать объект в таблице. Возвращает ID нового объекта.
+
+        Использует endpoint _m_new/{typeId} с форматом t{id}=value.
+
+        Args:
+            table_id:    ID таблицы (например TABLE_ORDERS=1024).
+            value:       Название объекта (главное поле).
+            requisites:  Реквизиты {req_id: значение}. Для reference — ID объекта.
+        """
+        http = await self._get_http()
+        form: dict[str, str] = {
+            "_xsrf": self._xsrf or "",
+            f"t{table_id}": value,
+            "up": "1",
+        }
+        if requisites:
+            for req_id, val in requisites.items():
+                form[f"t{req_id}"] = str(val)
+
+        resp = await http.post(
+            f"/{_DB}/_m_new/{table_id}?JSON",
+            data=form,
+            cookies={_DB: self._token or ""},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        obj_id = data.get("obj") or data.get("id")
+        if not obj_id:
+            raise IntegramAPIError(f"Не удалось создать объект: {data}")
+        obj_id = int(obj_id)
+
+        logger.info("Integram: создан объект id=%d в таблице %d", obj_id, table_id)
+        return obj_id
+
+    async def set_requisites(
+        self,
+        obj_id: int,
+        table_id: int,
+        requisites: dict[str, str],
+    ) -> None:
+        """Обновить реквизиты объекта через _m_save/{objectId}.
+
+        Формат: t{typeId}=value, t{reqId}=reqValue.
+        """
+        http = await self._get_http()
+        cookies = {_DB: self._token or ""}
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+        # Получить текущее значение и тип объекта
+        edit_resp = await http.get(
+            f"/{_DB}/edit_obj/{obj_id}?JSON",
+            cookies=cookies,
+        )
+        edit_resp.raise_for_status()
+        edit_data = edit_resp.json()
+        obj_meta = edit_data.get("obj", {})
+        type_id = obj_meta.get("typ", str(table_id))
+        obj_val = obj_meta.get("val", "")
+
+        form: dict[str, str] = {
+            "_xsrf": self._xsrf or "",
+            f"t{type_id}": obj_val,
+        }
+        for req_id, val in requisites.items():
+            form[f"t{req_id}"] = str(val)
+
+        resp = await http.post(
+            f"/{_DB}/_m_save/{obj_id}?JSON",
+            data=form,
+            cookies=cookies,
+            headers=headers,
+        )
+        resp.raise_for_status()
+
+    async def delete_object(self, obj_id: int) -> None:
+        """Удалить объект по ID.
+
+        Использует endpoint _m_del/{objectId}?JSON.
+        """
+        http = await self._get_http()
+        resp = await http.post(
+            f"/{_DB}/_m_del/{obj_id}?JSON",
+            data={"_xsrf": self._xsrf or ""},
+            cookies={_DB: self._token or ""},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        logger.info("Integram: удалён объект id=%d", obj_id)
+
+    async def update_object_value(self, obj_id: int, new_value: str) -> None:
+        """Обновить главное поле (val) объекта через _m_save."""
+        http = await self._get_http()
+        data = {
+            "_xsrf": self._xsrf or "",
+            "t_val": new_value,
+        }
+        resp = await http.post(
+            f"/{_DB}/_m_save/{obj_id}?JSON",
+            data=data,
+            cookies={_DB: self._token or ""},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        logger.info("Integram: обновлён val объекта id=%d → '%s'", obj_id, new_value)
+
+    async def get_order_items(self, order_id: Optional[int] = None) -> list[dict[str, Any]]:
+        """Получить позиции заказов.
+
+        Args:
+            order_id: Если указан — только позиции этого заказа.
+        """
+        raw = await self.get_all_objects(TABLE_ORDER_ITEMS)
+        items = []
+        for obj in raw:
+            r = obj["reqs"]
+            ref_order_id = _extract_ref_id(r.get(REQ_ITEM_ORDER, ""))
+            if order_id and ref_order_id != order_id:
+                continue
+            items.append({
+                "id": obj["id"],
+                "name": obj["val"],
+                "order_id": ref_order_id,
+                "product_id": _extract_ref_id(r.get(REQ_ITEM_PRODUCT, "")),
+                "product_name": _extract_ref_text(r.get(REQ_ITEM_PRODUCT, "")),
+                "quantity": int(_parse_number(r.get(REQ_ITEM_QTY, "")) or 0),
+                "unit_price": _parse_number(r.get(REQ_ITEM_PRICE, "")) or 0,
+                "total": _parse_number(r.get(REQ_ITEM_SUM, "")) or 0,
+            })
+        return items
 
     # ------------------------------------------------------------------
     # Высокоуровневые методы для веб-панели
@@ -333,6 +494,7 @@ class IntegramAPI:
                 "sku_uds": _strip_html(r.get(REQ_PRODUCT_SKU, "")),
                 "category": _extract_ref_text(r.get(REQ_PRODUCT_CATEGORY, "")),
                 "short_name": _strip_html(r.get(REQ_PRODUCT_SHORT, "")),
+                "stock": _parse_number(r.get(REQ_PRODUCT_STOCK, "")),
             })
         return products
 

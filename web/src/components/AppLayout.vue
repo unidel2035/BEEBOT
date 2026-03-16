@@ -68,7 +68,9 @@ const navItems = [
   { to: '/orders', icon: 'pi-shopping-cart', label: 'Заказы' },
   { to: '/clients', icon: 'pi-users', label: 'Клиенты' },
   { to: '/products', icon: 'pi-box', label: 'Товары' },
-  { to: '/orders/new', icon: 'pi-plus-circle', label: 'Новый заказ' }
+  { to: '/orders/new', icon: 'pi-plus-circle', label: 'Новый заказ' },
+  { to: '/packing', icon: 'pi-box', label: 'Сборка' },
+  { to: '/stock', icon: 'pi-warehouse', label: 'Склад' }
 ]
 
 function isActive(path) {

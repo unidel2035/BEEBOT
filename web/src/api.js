@@ -52,6 +52,11 @@ export async function getDashboard() {
   return data
 }
 
+export async function getDashboardCharts() {
+  const { data } = await http.get('/dashboard/charts')
+  return data
+}
+
 // ---------------------------------------------------------------------------
 // Reference
 // ---------------------------------------------------------------------------
@@ -158,5 +163,14 @@ export async function updateProduct(id, body) {
 
 export async function deleteProduct(id) {
   const { data } = await http.delete(`/products/${id}`)
+  return data
+}
+
+// ---------------------------------------------------------------------------
+// Stock (Склад)
+// ---------------------------------------------------------------------------
+
+export async function updateStock(productId, stock) {
+  const { data } = await http.patch(`/products/${productId}/stock`, { stock })
   return data
 }

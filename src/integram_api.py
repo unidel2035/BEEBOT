@@ -85,6 +85,7 @@ REQ_PRODUCT_INSTOCK = "1033"
 REQ_PRODUCT_SKU = "1035"
 REQ_PRODUCT_CATEGORY = "1067"
 REQ_PRODUCT_SHORT = "1173"
+REQ_PRODUCT_STOCK = "4850"
 
 
 class IntegramAPIError(Exception):
@@ -386,6 +387,22 @@ class IntegramAPI:
         resp.raise_for_status()
         logger.info("Integram: удалён объект id=%d", obj_id)
 
+    async def update_object_value(self, obj_id: int, new_value: str) -> None:
+        """Обновить главное поле (val) объекта через _m_save."""
+        http = await self._get_http()
+        data = {
+            "_xsrf": self._xsrf or "",
+            "t_val": new_value,
+        }
+        resp = await http.post(
+            f"/{_DB}/_m_save/{obj_id}?JSON",
+            data=data,
+            cookies={_DB: self._token or ""},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        logger.info("Integram: обновлён val объекта id=%d → '%s'", obj_id, new_value)
+
     async def get_order_items(self, order_id: Optional[int] = None) -> list[dict[str, Any]]:
         """Получить позиции заказов.
 
@@ -477,6 +494,7 @@ class IntegramAPI:
                 "sku_uds": _strip_html(r.get(REQ_PRODUCT_SKU, "")),
                 "category": _extract_ref_text(r.get(REQ_PRODUCT_CATEGORY, "")),
                 "short_name": _strip_html(r.get(REQ_PRODUCT_SHORT, "")),
+                "stock": _parse_number(r.get(REQ_PRODUCT_STOCK, "")),
             })
         return products
 

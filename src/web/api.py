@@ -38,6 +38,7 @@ from src.integram_api import (
     REQ_CLIENT_TG_ID,
     TABLE_ORDERS,
     TABLE_ORDER_ITEMS,
+    TABLE_PRODUCTS,
     REQ_ORDER_STATUS,
     REQ_ORDER_TRACKING,
     REQ_ORDER_ADDRESS,
@@ -51,6 +52,14 @@ from src.integram_api import (
     REQ_ITEM_QTY,
     REQ_ITEM_PRICE,
     REQ_ITEM_SUM,
+    REQ_PRODUCT_PRICE,
+    REQ_PRODUCT_WEIGHT,
+    REQ_PRODUCT_DESC,
+    REQ_PRODUCT_INSTOCK,
+    REQ_PRODUCT_SKU,
+    REQ_PRODUCT_CATEGORY,
+    REQ_PRODUCT_SHORT,
+    REQ_PRODUCT_STOCK,
 )
 from src.web.notifications import notify_client_status_change, notify_client_tracking
 
@@ -223,6 +232,92 @@ async def get_dashboard(
     except IntegramAPIError as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+
+
+@app.get("/api/dashboard/charts", tags=["dashboard"])
+async def get_dashboard_charts(
+    _: str = Depends(_get_current_user),
+) -> dict[str, Any]:
+    """Данные для графиков дашборда: выручка по месяцам, воронка статусов, доставка."""
+    import re
+    from collections import defaultdict
+
+    try:
+        integram = await _get_integram()
+        try:
+            orders = await integram.get_orders()
+
+            # --- Выручка и количество заказов по месяцам ---
+            monthly_revenue: dict[str, float] = defaultdict(float)
+            monthly_count: dict[str, int] = defaultdict(int)
+            for o in orders:
+                # Дата в формате "DD.MM.YYYY HH:MM:SS"
+                date_str = o.get("date", "")
+                month_key = None
+                if date_str:
+                    m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", date_str)
+                    if m:
+                        month_key = f"{m.group(3)}-{m.group(2)}"
+                # Отфильтровать мусорные даты (только 2024-2030)
+                if month_key and "2024" <= month_key <= "2030":
+                    monthly_revenue[month_key] += o.get("total") or 0
+                    monthly_count[month_key] += 1
+
+            # Сортировать по ключу (YYYY-MM)
+            sorted_months = sorted(monthly_revenue.keys())
+            month_labels = []
+            _MONTH_NAMES = {
+                "01": "Янв", "02": "Фев", "03": "Мар", "04": "Апр",
+                "05": "Май", "06": "Июн", "07": "Июл", "08": "Авг",
+                "09": "Сен", "10": "Окт", "11": "Ноя", "12": "Дек",
+            }
+            for mk in sorted_months:
+                parts = mk.split("-")
+                if len(parts) == 2:
+                    month_labels.append(f"{_MONTH_NAMES.get(parts[1], parts[1])} {parts[0][-2:]}")
+                else:
+                    month_labels.append(mk)
+
+            revenue_data = [monthly_revenue[m] for m in sorted_months]
+            count_data = [monthly_count[m] for m in sorted_months]
+
+            # --- Воронка статусов ---
+            status_counts: dict[str, int] = defaultdict(int)
+            for o in orders:
+                s = o.get("status", "Неизвестно")
+                status_counts[s] += 1
+
+            funnel_labels = ORDER_STATUSES
+            funnel_data = [status_counts.get(s, 0) for s in funnel_labels]
+
+            # --- Способы доставки ---
+            delivery_counts: dict[str, int] = defaultdict(int)
+            for o in orders:
+                dm = o.get("delivery_method") or "Не указан"
+                delivery_counts[dm] += 1
+
+            delivery_labels = list(delivery_counts.keys())
+            delivery_data = [delivery_counts[k] for k in delivery_labels]
+
+            return {
+                "monthly": {
+                    "labels": month_labels,
+                    "revenue": revenue_data,
+                    "count": count_data,
+                },
+                "funnel": {
+                    "labels": funnel_labels,
+                    "data": funnel_data,
+                },
+                "delivery": {
+                    "labels": delivery_labels,
+                    "data": delivery_data,
+                },
+            }
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -650,3 +745,165 @@ async def list_products(
             await integram.close()
     except IntegramAPIError as exc:
         raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Товары: CRUD + остатки
+# ---------------------------------------------------------------------------
+
+CATEGORY_IDS = {
+    "Продукты пчеловодства": "1079",
+    "Настойки": "1080",
+    "Программы здоровья": "1081",
+    "Мёд": "1167",
+    "Наборы": "1168",
+    "Упаковка": "1169",
+    "Свечи": "1170",
+    "Чаи и травы": "1171",
+}
+
+
+class ProductCreate(BaseModel):
+    name: str
+    category: Optional[str] = None
+    price: Optional[float] = None
+    weight: Optional[float] = None
+    description: Optional[str] = None
+    in_stock: bool = True
+    sku_uds: Optional[str] = None
+    short_name: Optional[str] = None
+    stock: Optional[int] = None
+
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    price: Optional[float] = None
+    weight: Optional[float] = None
+    description: Optional[str] = None
+    in_stock: Optional[bool] = None
+    sku_uds: Optional[str] = None
+    short_name: Optional[str] = None
+    stock: Optional[int] = None
+
+
+class StockUpdate(BaseModel):
+    stock: int
+
+
+@app.post("/api/products", tags=["products"])
+async def create_product(
+    body: ProductCreate,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Создать товар."""
+    try:
+        integram = await _get_integram()
+        try:
+            reqs: dict[str, str] = {}
+            if body.price is not None:
+                reqs[REQ_PRODUCT_PRICE] = str(body.price)
+            if body.weight is not None:
+                reqs[REQ_PRODUCT_WEIGHT] = str(body.weight)
+            if body.description:
+                reqs[REQ_PRODUCT_DESC] = body.description
+            if body.in_stock:
+                reqs[REQ_PRODUCT_INSTOCK] = "1"
+            if body.sku_uds:
+                reqs[REQ_PRODUCT_SKU] = body.sku_uds
+            if body.category and body.category in CATEGORY_IDS:
+                reqs[REQ_PRODUCT_CATEGORY] = CATEGORY_IDS[body.category]
+            if body.short_name:
+                reqs[REQ_PRODUCT_SHORT] = body.short_name
+            if body.stock is not None:
+                reqs[REQ_PRODUCT_STOCK] = str(body.stock)
+
+            product_id = await integram.create_object(TABLE_PRODUCTS, body.name, reqs)
+            return {"ok": True, "product_id": product_id}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.patch("/api/products/{product_id}", tags=["products"])
+async def update_product(
+    product_id: int,
+    body: ProductUpdate,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Обновить товар."""
+    try:
+        integram = await _get_integram()
+        try:
+            reqs: dict[str, str] = {}
+            if body.price is not None:
+                reqs[REQ_PRODUCT_PRICE] = str(body.price)
+            if body.weight is not None:
+                reqs[REQ_PRODUCT_WEIGHT] = str(body.weight)
+            if body.description is not None:
+                reqs[REQ_PRODUCT_DESC] = body.description
+            if body.in_stock is not None:
+                reqs[REQ_PRODUCT_INSTOCK] = "1" if body.in_stock else ""
+            if body.sku_uds is not None:
+                reqs[REQ_PRODUCT_SKU] = body.sku_uds
+            if body.category is not None:
+                cat_id = CATEGORY_IDS.get(body.category)
+                if cat_id:
+                    reqs[REQ_PRODUCT_CATEGORY] = cat_id
+            if body.short_name is not None:
+                reqs[REQ_PRODUCT_SHORT] = body.short_name
+            if body.stock is not None:
+                reqs[REQ_PRODUCT_STOCK] = str(body.stock)
+
+            if body.name is not None:
+                # Обновить имя объекта отдельно (val)
+                await integram.update_object_value(product_id, body.name)
+
+            if reqs:
+                await integram.set_requisites(product_id, TABLE_PRODUCTS, reqs)
+
+            return {"ok": True, "product_id": product_id}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.delete("/api/products/{product_id}", tags=["products"])
+async def delete_product(
+    product_id: int,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Снять товар с продажи (in_stock = false)."""
+    try:
+        integram = await _get_integram()
+        try:
+            await integram.set_requisites(product_id, TABLE_PRODUCTS, {
+                REQ_PRODUCT_INSTOCK: "",
+            })
+            return {"ok": True, "product_id": product_id}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.patch("/api/products/{product_id}/stock", tags=["products"])
+async def update_product_stock(
+    product_id: int,
+    body: StockUpdate,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Обновить остаток товара на складе."""
+    try:
+        integram = await _get_integram()
+        try:
+            await integram.set_requisites(product_id, TABLE_PRODUCTS, {
+                REQ_PRODUCT_STOCK: str(body.stock),
+            })
+            return {"ok": True, "product_id": product_id, "stock": body.stock}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")

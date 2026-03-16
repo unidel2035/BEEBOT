@@ -16,22 +16,23 @@ Integram использует собственный REST-подобный API:
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any, Optional
 
 import httpx
 
+from src import config
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Конфигурация
+# Конфигурация (из src.config, который загружает .env)
 # ---------------------------------------------------------------------------
 
-_BASE_URL = os.getenv("INTEGRAM_URL", "https://ai2o.ru").rstrip("/")
-_DB = os.getenv("INTEGRAM_DB", "bibot")
-_LOGIN = os.getenv("INTEGRAM_LOGIN", "bibot")
-_PASSWORD = os.getenv("INTEGRAM_PASSWORD", "")
+_BASE_URL = (config.INTEGRAM_URL or "https://ai2o.ru").rstrip("/")
+_DB = config.INTEGRAM_DB or "bibot"
+_LOGIN = config.INTEGRAM_LOGIN or "bibot"
+_PASSWORD = config.INTEGRAM_PASSWORD or ""
 
 # ---------------------------------------------------------------------------
 # ID таблиц и реквизитов (из CRM-схемы)

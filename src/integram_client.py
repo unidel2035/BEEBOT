@@ -22,6 +22,7 @@ from src.integram_api import (
     TABLE_ORDERS,
     TABLE_CLIENTS,
     TABLE_PRODUCTS,
+    TABLE_ORDER_ITEMS,
     REQ_ORDER_ADDRESS,
     REQ_ORDER_DELIVERY_COST,
     REQ_ORDER_ITEMS_TOTAL,
@@ -39,6 +40,11 @@ from src.integram_api import (
     REQ_CLIENT_ADDRESS,
     REQ_CLIENT_CITY,
     REQ_CLIENT_SOURCE,
+    REQ_ITEM_QTY,
+    REQ_ITEM_PRICE,
+    REQ_ITEM_SUM,
+    REQ_ITEM_PRODUCT,
+    REQ_ITEM_ORDER,
 )
 from src.models import Client, Order, OrderItem, Product
 
@@ -326,6 +332,24 @@ class IntegramClient:
 
         obj_id = await self._api.create_object(TABLE_ORDERS, number, reqs)
         logger.info("Создан заказ '%s' (id=%d) в Integram. Итого: %.0f ₽", number, obj_id, total)
+
+        # Создать позиции заказа
+        for item_data in items:
+            qty = item_data.get("quantity", 1)
+            price = item_data.get("unit_price", 0)
+            item_reqs = {
+                REQ_ITEM_ORDER: str(obj_id),
+                REQ_ITEM_PRODUCT: str(item_data["product_id"]),
+                REQ_ITEM_QTY: str(qty),
+                REQ_ITEM_PRICE: str(price),
+                REQ_ITEM_SUM: str(qty * price),
+            }
+            item_name = f"Позиция заказа {number}"
+            await self._api.create_object(TABLE_ORDER_ITEMS, item_name, item_reqs)
+            logger.info(
+                "Создана позиция заказа: product=%s, qty=%s, sum=%s",
+                item_data["product_id"], qty, qty * price,
+            )
 
         return Order(
             id=obj_id,

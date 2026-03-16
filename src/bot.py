@@ -433,8 +433,11 @@ async def fsm_choose_product(message: types.Message, state: FSMContext) -> None:
 
     prefill = ""
     if existing_client and existing_client.full_name:
-        prefill = f"\nПодсказка: в прошлый раз вы представились как *{existing_client.full_name}*.\nПросто отправьте его или введите другое."
-        await state.update_data(prefill_name=existing_client.full_name)
+        name = existing_client.full_name
+        # Не предлагать автоподстановку если имя = "Telegram XXXXX"
+        if not name.startswith("Telegram "):
+            prefill = f"\nПодсказка: в прошлый раз вы представились как *{name}*.\nПросто отправьте *да* или введите другое."
+            await state.update_data(prefill_name=name)
 
     await state.set_state(OrderFSM.entering_name)
     _reset_timeout(user_id, message.chat.id, state)

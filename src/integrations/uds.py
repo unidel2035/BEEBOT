@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_UDS_BASE_URL = "https://api.uds.app/partner/v2"
+_UDS_BASE_URL = getattr(config, "UDS_BASE_URL", None) or "https://api.uds.app/partner/v2"
 _POLL_INTERVAL_SECONDS = 60  # опрос каждую минуту
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 1.0

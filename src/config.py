@@ -46,6 +46,7 @@ ADMIN_CHAT_ID: int | None = int(_admin_raw) if _admin_raw else BEEKEEPER_CHAT_ID
 # UDS (система лояльности)
 UDS_API_KEY = os.getenv("UDS_API_KEY")
 UDS_COMPANY_ID = os.getenv("UDS_COMPANY_ID")
+UDS_BASE_URL = os.getenv("UDS_BASE_URL")  # Optional proxy URL
 
 # Delivery (СДЭК + Почта России)
 CDEK_CLIENT_ID = os.getenv("CDEK_CLIENT_ID")

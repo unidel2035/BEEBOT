@@ -5,6 +5,8 @@
   GET  /api/dashboard           — статистика (новые заказы, выручка за день/неделю)
   GET  /api/orders              — список заказов (фильтр по статусу, клиенту)
   GET  /api/orders/{id}         — заказ по ID
+  PATCH /api/orders/{id}/status   — сменить статус заказа
+  PATCH /api/orders/{id}/tracking — ввести трек-номер
   GET  /api/clients             — список клиентов
   GET  /api/clients/{id}        — клиент + история заказов
   GET  /api/products            — список товаров
@@ -30,7 +32,15 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
-from src.integram_api import IntegramAPI, IntegramAPIError
+from src.integram_api import (
+    IntegramAPI,
+    IntegramAPIError,
+    REQ_CLIENT_TG_ID,
+    TABLE_ORDERS,
+    REQ_ORDER_STATUS,
+    REQ_ORDER_TRACKING,
+)
+from src.web.notifications import notify_client_status_change, notify_client_tracking
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +131,31 @@ async def _get_integram() -> IntegramAPI:
     client = IntegramAPI()
     await client.authenticate()
     return client
+
+
+async def _find_order(integram: IntegramAPI, order_id: int) -> Optional[dict]:
+    """Найти заказ по ID (среди всех заказов)."""
+    orders = await integram.get_orders()
+    for o in orders:
+        if o["id"] == order_id:
+            return o
+    return None
+
+
+async def _get_client_telegram_id(integram: IntegramAPI, client_id: Optional[int]) -> Optional[int]:
+    """Получить Telegram ID клиента по его ID в CRM."""
+    if not client_id:
+        return None
+    clients = await integram.get_clients()
+    for c in clients:
+        if c["id"] == client_id:
+            tg_id = c.get("telegram_id", "")
+            if tg_id:
+                try:
+                    return int(tg_id)
+                except (ValueError, TypeError):
+                    return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +257,103 @@ async def get_order(
             await integram.close()
     except IntegramAPIError as exc:
         raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Обновление заказов (статус, трек-номер)
+# ---------------------------------------------------------------------------
+
+STATUS_IDS = {
+    "Новый": "1086",
+    "Подтверждён": "1087",
+    "В сборке": "1088",
+    "Отправлен": "1089",
+    "Доставлен": "1090",
+    "Отменён": "1091",
+}
+
+
+class StatusUpdate(BaseModel):
+    status: str
+
+
+class TrackingUpdate(BaseModel):
+    tracking_number: str
+
+
+@app.patch("/api/orders/{order_id}/status", tags=["orders"])
+async def update_order_status(
+    order_id: int,
+    body: StatusUpdate,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Сменить статус заказа и уведомить клиента в Telegram."""
+    if body.status not in STATUS_IDS:
+        raise HTTPException(400, f"Неизвестный статус: {body.status}")
+    try:
+        integram = await _get_integram()
+        try:
+            await integram.set_requisites(order_id, TABLE_ORDERS, {
+                REQ_ORDER_STATUS: STATUS_IDS[body.status],
+            })
+
+            # Уведомить клиента в Telegram
+            notified = False
+            try:
+                order = await _find_order(integram, order_id)
+                if order:
+                    tg_id = await _get_client_telegram_id(integram, order.get("client_id"))
+                    if tg_id:
+                        notified = await notify_client_status_change(
+                            telegram_id=tg_id,
+                            order_number=order.get("number", str(order_id)),
+                            new_status=body.status,
+                            tracking_number=order.get("tracking_number"),
+                        )
+            except Exception as e:
+                logger.warning("Не удалось уведомить клиента: %s", e)
+
+            return {"ok": True, "order_id": order_id, "status": body.status, "notified": notified}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.patch("/api/orders/{order_id}/tracking", tags=["orders"])
+async def update_order_tracking(
+    order_id: int,
+    body: TrackingUpdate,
+    _: str = Depends(_get_current_user),
+) -> dict:
+    """Ввести трек-номер и уведомить клиента."""
+    try:
+        integram = await _get_integram()
+        try:
+            await integram.set_requisites(order_id, TABLE_ORDERS, {
+                REQ_ORDER_TRACKING: body.tracking_number,
+            })
+
+            # Уведомить клиента
+            notified = False
+            try:
+                order = await _find_order(integram, order_id)
+                if order:
+                    tg_id = await _get_client_telegram_id(integram, order.get("client_id"))
+                    if tg_id:
+                        notified = await notify_client_tracking(
+                            telegram_id=tg_id,
+                            order_number=order.get("number", str(order_id)),
+                            tracking_number=body.tracking_number,
+                        )
+            except Exception as e:
+                logger.warning("Не удалось уведомить клиента: %s", e)
+
+            return {"ok": True, "order_id": order_id, "tracking_number": body.tracking_number, "notified": notified}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
 
 
 # ---------------------------------------------------------------------------

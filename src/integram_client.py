@@ -34,6 +34,7 @@ from src.integram_api import (
     REQ_ORDER_DELIVERY_METHOD,
     REQ_ORDER_SOURCE,
     REQ_ORDER_MESSENGER,
+    REQ_ORDER_DATE,
     REQ_CLIENT_PHONE,
     REQ_CLIENT_TG_ID,
     REQ_CLIENT_TG_USER,
@@ -282,9 +283,11 @@ class IntegramClient:
         status = kwargs.get("status", "Новый")
         source = kwargs.get("source", "Telegram")
         delivery_method = kwargs.get("delivery_method", "")
+        order_date = kwargs.get("date") or datetime.now()
 
         # Собрать реквизиты
         reqs: dict[str, str] = {}
+        reqs[REQ_ORDER_DATE] = order_date.strftime("%d.%m.%Y 00:00:00")
         if client_id:
             reqs[REQ_ORDER_CLIENT] = str(client_id)
         if status in STATUS_IDS:

@@ -168,6 +168,7 @@ class DashboardStats(BaseModel):
 class ReferenceData(BaseModel):
     order_statuses: list[str]
     delivery_methods: list[str]
+    order_sources: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +305,7 @@ async def get_reference(
     return ReferenceData(
         order_statuses=ORDER_STATUSES,
         delivery_methods=DELIVERY_METHODS,
+        order_sources=list(SOURCE_IDS.keys()),
     )
 
 
@@ -422,6 +424,7 @@ async def get_dashboard_charts(
 @app.get("/api/orders", tags=["orders"])
 async def list_orders(
     status: Optional[str] = None,
+    source: Optional[str] = None,
     client_id: Optional[int] = None,
     user: CurrentUser = Depends(_require_role("admin", "warehouse")),
 ) -> list[dict[str, Any]]:
@@ -432,6 +435,8 @@ async def list_orders(
             orders = await integram.get_orders()
             if status:
                 orders = [o for o in orders if o.get("status") == status]
+            if source:
+                orders = [o for o in orders if o.get("source") == source]
             if client_id:
                 orders = [o for o in orders if o.get("client_id") == client_id]
             return orders

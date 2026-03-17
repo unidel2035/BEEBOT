@@ -309,6 +309,15 @@ async def sync_uds_transaction(
     name = transaction["customer_name"] or f"UDS-клиент {transaction['customer_uds_id']}"
     total = transaction["total"]
 
+    # Дата транзакции из UDS (или текущая, если не удалось распарсить)
+    order_date = datetime.now(tz=timezone.utc)
+    created_raw = transaction.get("created_at", "")
+    if created_raw:
+        try:
+            order_date = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
     logger.info("UDS: обрабатываем транзакцию %s (клиент: %s, сумма: %.2f)", tid, name, total)
 
     # 1. Найти или создать клиента по телефону
@@ -327,6 +336,7 @@ async def sync_uds_transaction(
         items_total=items_total,
         total=total,
         status="Новый",
+        date=order_date,
     )
     logger.info("UDS: создан заказ #%s (Integram ID=%d)", order.number, order.id)
 

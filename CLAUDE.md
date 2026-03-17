@@ -2,7 +2,7 @@
 
 ## Что это за проект
 
-**BEEBOT** — Telegram-помощник для автора блога о продуктах пчеловодства «Усадьба Дмитровых». Это не просто FAQ-бот, а **цифровой двойник пчеловода** — отвечает на вопросы подписчиков с мудростью, заботой и опытом настоящего мастера.
+**BEEBOT** — Telegram-помощник + веб-панель управления заказами для «Усадьба Дмитровых». Это **цифровой двойник пчеловода** — отвечает на вопросы подписчиков, принимает заказы, управляет складом и доставкой.
 
 Проект создаётся на стыке вековых традиций пчеловодства и современных AI-технологий.
 
@@ -14,13 +14,14 @@
 
 ### 1. База знаний «Пасека»
 Гибридная система поиска (FAISS), объединяющая:
-- **PDF-инструкции** — 13+ документов по прополису, перге, ПЖВМ, гомогенату и др.
+- **PDF-инструкции** — 19 документов по прополису, перге, ПЖВМ, гомогенату и др.
+- **Тексты** — 21 файл (очищенные выдержки из PDF)
 - **Субтитры YouTube** — расшифровки 26 видео с канала @a.dmitrov
 - **Стилометрия** — анализ стиля автора (70% семантика + 30% стилометрия)
 - **Keyword-буст** — прямое попадание в нужный продукт по ключевым словам
 - Всего **410 чанков** в индексе
 
-### 2. Telegram-интерфейс
+### 2. Telegram-бот
 - `/start` — приветствие + кнопки «Все продукты» / «Как пользоваться»
 - `/products` — каталог по категориям: 🍯 Продукты, 🌿 Настойки, 📋 Программы здоровья
 - `/ask` — приглашение задать вопрос
@@ -28,127 +29,150 @@
 - Работа в группах (по @mention или reply)
 - Контекстные кнопки после каждого ответа (релевантный PDF + каталог)
 
-### 3. LLM-генерация ответов
+### 3. Многоагентная система (LangGraph)
+- **Оркестратор** — классифицирует интент (consult / order / delivery / status / stats / chitchat)
+- **Консультант (BEEBOT)** — FAISS-поиск → LLM-ответ в стиле автора
+- **Логист** — 7-шаговый FSM оформления заказа (товар → ФИО → телефон → адрес → доставка → подтверждение → создание)
+- **Аналитик** — статистика продаж, топ товаров (доступ: только ADMIN_CHAT_ID)
+
+### 4. Веб-панель (PWA)
+- **Дашборд** — 6 карточек статистики + 4 графика (выручка, заказы, статусы, доставка)
+- **Заказы** — список, детали, смена статуса, трекинг, создание нового
+- **Клиенты** — список, карточка клиента с историей заказов
+- **Товары** — каталог, CRUD, управление остатками
+- **Сборка** (PWA терминал) — чеклист сборки заказов на пасеке, offline-first
+- **Склад** (PWA терминал) — учёт остатков, +/− кнопки, алерты при низком запасе, offline-first
+- **Журнал** — заказы по месяцам
+- JWT-авторизация, PrimeVue UI
+
+### 5. CRM-интеграция (Integram)
+- База данных: `bibot` на ai2o.ru
+- 76 товаров, 285+ клиентов, 326+ заказов
+- Таблицы: Товары, Клиенты, Заказы, Позиции заказа
+- Справочники: Категории (8), Источники (6), Статусы (6), Способы доставки (3)
+- Жизненный цикл заказа: Новый → Подтверждён → В сборке → Отправлен → Доставлен (или Отменён)
+
+### 6. LLM-генерация ответов
 - Модель: `llama-3.3-70b-versatile` через Groq API
 - Системный промпт: стиль Александра Дмитрова (дружелюбный, практичный, русскоязычный)
 - Защита от галлюцинаций: ответы строго на основе контекста из базы знаний
 - Retry-логика (3 попытки с backoff)
-
-## Стратегическое развитие: от FAQ-бота к системе автоматизации заказов
-
-### Видение
-BEEBOT эволюционирует из консультанта в **полноценную систему управления заказами** «Усадьба Дмитровых». Три источника заказов (UDS, мессенджеры, ручной ввод) сходятся в единый поток, обрабатываемый AI-агентами.
-
-### Целевая архитектура (Вариант 3: Integram CRM + лёгкие агенты)
-
-```
-Источники заказов:
-  [UDS API] ──────────┐
-  [Telegram/WhatsApp] ─┼──→ Оркестратор (Python, LangGraph)
-  [Ручной ввод] ──────┘         │
-                                 ├── Агент «Логист» — сбор адреса, ФИО, расчёт доставки
-                                 ├── Агент «Аналитик» — статистика, что фасовать
-                                 └── BEEBOT (текущий) — консультации по продуктам
-                                          │
-                    ┌────────────────────────┤
-                    ▼                        ▼
-              Integram (CRM)          API доставки
-              хранение заказов,       СДЭК, Почта России
-              клиентов, товаров       тарифы + трекинг
-                    │
-                    ▼
-              Уведомления пчеловоду (Telegram)
-              подтверждение → сборка → трек-номер → клиент уведомлён
-```
-
-### Агенты системы
-
-| Агент | Статус | Роль |
-|-------|--------|------|
-| **BEEBOT** | ✅ Production | Консультант — отвечает на вопросы о продуктах |
-| **Оркестратор** | 📋 Планируется | Главный мозг — маршрутизация заказов из всех каналов |
-| **Логист** | 📋 Планируется | Диалог с клиентом: ФИО, адрес, способ доставки, расчёт |
-| **Аналитик** | 📋 Планируется | Статистика продаж, подсказки по фасовке |
-
-### Режимы общения «Голос Улья» (планируется)
-Переключаемые стили ответов бота:
-- **Мудрый Наставник** (базовый) — советы с историями из жизни
-- **Пчеловод-Практик** — чёткие инструкции: как, когда и сколько
-- **Селекционер** — через призму пород, маток и генетики
-- **Зимовщик** — всё через заботу о подготовке к зиме
-- **Эколог** — акцент на медоносной базе и экологии
-
-### Режим «Осмотр улья» (планируется)
-Диалоговый квест: бот задаёт серию уточняющих вопросов (как при реальном осмотре), чтобы «поставить диагноз» семье или проблеме.
 
 ## Технологический стек
 
 | Компонент | Технология |
 |-----------|-----------|
 | Язык | Python 3, asyncio |
-| Telegram-фреймворк | aiogram 3 |
+| Telegram | aiogram 3 |
+| Оркестратор | LangGraph (StateGraph) |
 | LLM | Groq API (llama-3.3-70b-versatile) |
 | Эмбеддинги | sentence-transformers (paraphrase-multilingual-MiniLM-L12-v2) |
 | Векторный поиск | FAISS (IndexFlatIP, cosine similarity) |
 | Чанкинг | langchain-text-splitters (RecursiveCharacterTextSplitter) |
+| CRM | Integram (ai2o.ru/bibot) — REST API через httpx |
+| Веб-API | FastAPI + uvicorn |
+| Frontend | Vue 3, PrimeVue, Vite, PWA (vite-plugin-pwa) |
+| Offline | Service Worker + IndexedDB (кэш + sync queue) |
+| Валидация | Pydantic 2 |
 | PDF-парсинг | PyPDF2 |
 | YouTube | youtube-transcript-api, yt-dlp |
 | Инфраструктура | Docker, docker-compose, systemd |
 | VPS | 185.233.200.13, SSH-туннель для Groq API |
-| CRM (планируется) | Integram (ai2o.ru) — через MCP |
 
 ## Структура проекта
 
 ```
-/home/hive/BEEBOT/
+BEEBOT/
 ├── src/
-│   ├── bot.py              # Telegram-бот: хэндлеры, UI, inline-кнопки
-│   ├── config.py           # Конфигурация из .env
-│   ├── knowledge_base.py   # FAISS + стилометрия, гибридный поиск
-│   ├── llm_client.py       # Groq API клиент, системный промпт
-│   ├── pdf_loader.py       # Извлечение текста из PDF
-│   ├── youtube_loader.py   # Загрузка субтитров YouTube
-│   └── build_kb.py         # Сборка базы знаний (txt → pdf → youtube → FAISS)
+│   ├── bot.py                  # Telegram-бот (aiogram 3): хэндлеры, UI, inline-кнопки
+│   ├── orchestrator.py         # LangGraph — маршрутизация интентов (6 типов)
+│   ├── config.py               # Конфигурация из .env
+│   ├── agents/
+│   │   ├── beebot.py           # Агент-консультант (FAISS → LLM)
+│   │   ├── logist.py           # Агент-логист (FSM заказов, 7 шагов)
+│   │   └── analyst.py          # Агент-аналитик (статистика продаж)
+│   ├── knowledge_base.py       # FAISS + стилометрия, гибридный поиск
+│   ├── llm_client.py           # Groq API клиент, системный промпт
+│   ├── integram_api.py         # CRM REST API клиент (низкоуровневый)
+│   ├── integram_client.py      # CRM обёртка (высокоуровневая)
+│   ├── crm_schema.py           # Схема таблиц CRM (ID типов, реквизитов)
+│   ├── models.py               # Pydantic-модели (Order, Client, Product)
+│   ├── admin.py                # Админ-команды Telegram
+│   ├── notifications.py        # Уведомления пчеловоду
+│   ├── delivery/
+│   │   ├── calculator.py       # Калькулятор стоимости доставки
+│   │   ├── cdek.py             # СДЭК API
+│   │   └── pochta.py           # Почта России API
+│   ├── integrations/
+│   │   └── uds.py              # UDS (система лояльности)
+│   ├── web/
+│   │   ├── api.py              # FastAPI — REST API (JWT, CRUD, дашборд)
+│   │   └── server.py           # Статика + PWA root files
+│   ├── pdf_loader.py           # Извлечение текста из PDF
+│   ├── youtube_loader.py       # Загрузка субтитров YouTube
+│   └── build_kb.py             # Сборка базы знаний (txt → pdf → youtube → FAISS)
+├── web/                        # Frontend (Vue 3 + PrimeVue)
+│   ├── src/
+│   │   ├── views/              # 11 страниц (Dashboard, Orders, Clients, Products, Packing, Stock, Journal...)
+│   │   ├── components/         # UI-компоненты (AppLayout, StatCard, StatusBadge)
+│   │   ├── stores/             # Pinia (auth) + offline.js (IndexedDB)
+│   │   ├── router/             # Vue Router (auth guard)
+│   │   ├── api.js              # HTTP-клиент (axios + JWT interceptor)
+│   │   └── utils.js            # Утилиты (formatDate, formatMoney)
+│   ├── vite.config.js          # Vite + VitePWA plugin
+│   └── package.json
 ├── data/
-│   ├── subtitles/          # 26 файлов .txt (расшифровки YouTube)
-│   ├── texts/              # 16 файлов .txt (чистый текст из PDF, основной источник)
+│   ├── pdfs/                   # 19 PDF-инструкций
+│   ├── texts/                  # 21 текстовый источник
+│   ├── subtitles/              # 26 расшифровок YouTube
 │   └── processed/
-│       ├── index.faiss     # FAISS-индекс (410 чанков)
-│       └── chunks.json     # Метаданные чанков
+│       ├── index.faiss         # FAISS-индекс (410 чанков)
+│       └── chunks.json         # Метаданные чанков
+├── docs/
+│   └── architecture.md         # Mermaid-диаграммы архитектуры
 ├── systemd/
-│   ├── groq-proxy.service  # Автозапуск reverse proxy для Groq на hive
-│   ├── groq-tunnel.service # SSH-туннель VPS↔hive (порт 8990)
+│   ├── groq-proxy.service      # Автозапуск reverse proxy для Groq на hive
+│   ├── groq-tunnel.service     # SSH-туннель VPS↔hive (порт 8990)
 │   └── install-hive-services.sh
-├── tools/
-│   └── generate_pdfs.py    # Генерация PDF из текстов
-├── groq_proxy.py           # Reverse proxy (hive:8990 → api.groq.com)
-├── Dockerfile
-├── docker-compose.yml      # network_mode: host
-├── deploy.sh               # Деплой на VPS
-├── beebot.service          # systemd unit для VPS
-├── requirements.txt
-├── .env                    # Секреты (НЕ в git)
+├── Dockerfile                  # Бот (Python + FAISS + sentence-transformers)
+├── Dockerfile.web              # Веб-панель (Node build → Python serve)
+├── docker-compose.yml          # 2 сервиса: beebot (host) + beebot-web (8088:8080)
+├── deploy.sh                   # Деплой на VPS
+├── groq_proxy.py               # Reverse proxy (hive:8990 → api.groq.com)
+├── requirements.txt            # Зависимости Python
+├── analysis.md                 # Анализ проекта (баги, долг, приоритеты)
+├── plan.md                     # План развития (4 фазы)
+├── .env                        # Секреты (НЕ в git)
 └── .env.example
 ```
 
-## Архитектура (текущая)
+## Архитектура
 
 ```
 Telegram → aiogram бот (VPS Docker, network_mode: host)
-  → FAISS (семантика 70% + стилометрия 30%)
+  → Оркестратор (LangGraph) → classify intent
+  → Агент Консультант → FAISS (семантика 70% + стилометрия 30%)
   → SSH-туннель (VPS:8990 → hive:8990) ← systemd, auto-restart
   → Groq Proxy (hive, порт 8990)       ← systemd, auto-restart
   → Groq API (llama-3.3-70b-versatile)
   → Ответ в стиле Александра Дмитрова + кнопки с PDF
+
+Веб-панель (Vue 3 + PrimeVue, PWA) → FastAPI (порт 8088)
+  → Integram CRM (ai2o.ru/bibot)
+  → JWT-авторизация
 ```
+
+Подробные Mermaid-диаграммы: [docs/architecture.md](docs/architecture.md)
 
 ## Инфраструктура и деплой
 
 | Ресурс | Адрес | Детали |
 |--------|-------|--------|
 | VPS | 185.233.200.13 | ai-agent, SSH-ключ, Docker |
+| Веб-панель | http://185.233.200.13:8088 | FastAPI + Vue PWA |
 | hive | локальная машина | groq-proxy + groq-tunnel (systemd) |
 | SSH-алиас | `beebot-vps` | `ssh beebot-vps` |
+| CRM | ai2o.ru/bibot | Integram, база данных `bibot` |
 | GitHub upstream | [alekseymavai/BEEBOT](https://github.com/alekseymavai/BEEBOT) | Основной репозиторий |
 | GitHub fork | [unidel2035/BEEBOT](https://github.com/unidel2035/BEEBOT) | PR через fork (нет push-доступа к upstream) |
 
@@ -157,44 +181,64 @@ Telegram → aiogram бот (VPS Docker, network_mode: host)
 # Проверить статус
 systemctl status groq-proxy groq-tunnel
 ssh beebot-vps "docker logs --tail 10 beebot"
-
-# Обновить код без пересборки
-scp src/bot.py beebot-vps:/home/ai-agent/BEEBOT/src/bot.py
-ssh beebot-vps "docker restart beebot"
+ssh beebot-vps "docker logs --tail 10 beebot-web"
 
 # Полный редеплой
 ssh beebot-vps "cd /home/ai-agent/BEEBOT && git pull && docker compose up -d --build"
 
 # Пересобрать базу знаний
 ssh beebot-vps "docker exec beebot python -m src.build_kb"
+
+# Пересобрать только веб-панель
+ssh beebot-vps "cd /home/ai-agent/BEEBOT && docker compose up -d --build beebot-web"
 ```
 
-## Известные ограничения
+## Известные проблемы
 
+Полный анализ: [analysis.md](analysis.md)
+
+### Критические
+- **JWT-секрет** — дефолтное значение `dev-secret-change-in-production` в `src/web/api.py`. Нужно сделать обязательной переменной.
+- **UDS-интеграция** — `src/integrations/uds.py` вызывает несуществующий `_request()`. Модуль нерабочий.
+- **Логист не пишет в CRM** — заказ создаётся только как уведомление, не сохраняется в Integram.
+
+### Серьёзные
+- **Дублирование CRM-констант** — lookup ID в 3 местах (integram_api, integram_client, web/api). Нужен единый `crm_constants.py`.
+- **Два CRM-клиента** — `integram_api.py` и `integram_client.py` дублируют функционал.
+- **CORS `allow_origins=["*"]`** — нужно ограничить до конкретных доменов.
+
+### Известные ограничения
 1. **Groq блокирует IP VPS** → решено SSH-туннелем + прокси на hive
 2. **YouTube блокирует IP** → субтитры скачаны заранее в `data/subtitles/`
 3. **llama-3.3-70b** иногда вставляет иноязычные слова → частично решено промптом
 4. **unidel2035** не имеет push-доступа к upstream → только fork + PR
-5. **PDF-файлы в корне репозитория** → нужен рефакторинг (перенести в `data/pdfs/`)
+5. **Нет тестов** — ни unit, ни integration, ни e2e
+6. **Нет CI/CD** — деплой вручную через `deploy.sh` или `docker compose`
 
-## Расширение базы знаний — приоритеты
+## Документация проекта
 
-1. **YouTube Data API v3** — комментарии к видео (реальные Q&A + ответы автора)
-2. **Новые видео** с канала @a.dmitrov
-3. **FAQ-файл** — `data/texts/faq.txt` с частыми вопросами
+| Документ | Описание |
+|----------|----------|
+| [analysis.md](analysis.md) | Анализ: сильные/слабые стороны, баги, конфликты логик, технический долг |
+| [plan.md](plan.md) | План развития: 4 фазы (стабилизация → качество → функции → масштаб) |
+| [docs/architecture.md](docs/architecture.md) | Mermaid-диаграммы всех подсистем |
+| [README.md](README.md) | Обзор проекта (RU + EN) |
 
 ## Для ИИ-ассистента
 
 Если тебя (Claude) запустили в этом репозитории — ты помогаешь с:
 1. **Развитием бота** — новые фичи, рефакторинг, багфиксы
 2. **Построением системы заказов** — оркестратор, агенты, Integram CRM
-3. **Расширением базы знаний** — новые источники данных
-4. **Инфраструктурой** — Docker, деплой, мониторинг
+3. **Веб-панелью** — новые страницы, графики, PWA-улучшения
+4. **Расширением базы знаний** — новые источники данных
+5. **Инфраструктурой** — Docker, деплой, мониторинг, CI/CD
 
 ### Принципы разработки
 - **Русский язык** в интерфейсе, комментариях к коммитам, документации
 - **Простота** — пчеловод должен понимать что происходит
 - **Надёжность** — бот не должен падать, retry-логика обязательна
-- **Стиль автора** — все ответы должны звучать как Александр Дмитров
+- **Стиль автора** — все ответы бота должны звучать как Александр Дмитров
 - **Не фантазируй** — бот отвечает только на основе базы знаний
 - **Fork workflow** — PR через unidel2035/BEEBOT → alekseymavai/BEEBOT
+- **Не дублируй** — перед созданием нового кода проверь, нет ли уже аналога в проекте
+- **Актуальность** — при изменении архитектуры обновляй CLAUDE.md, analysis.md и docs/architecture.md

@@ -29,7 +29,6 @@ tmp/
 *.pdf
 *.xlsx
 *.csv
-!docs/*.xlsx
 
 # IDE
 .vscode/

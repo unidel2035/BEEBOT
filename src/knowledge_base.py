@@ -6,7 +6,7 @@ from pathlib import Path
 
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.config import (
@@ -79,7 +79,7 @@ class KnowledgeBase:
     """Hybrid vector knowledge base with semantic + stylometric search."""
 
     def __init__(self):
-        self.model: SentenceTransformer | None = None
+        self.model: TextEmbedding | None = None
         self.style_analyzer = StyleAnalyzer()
         self.index: faiss.IndexFlatIP | None = None
         self.chunks: list[dict] = []
@@ -88,8 +88,19 @@ class KnowledgeBase:
 
     def _load_model(self):
         if self.model is None:
-            self.model = SentenceTransformer(EMBEDDING_MODEL)
-            self.semantic_dim = self.model.get_sentence_embedding_dimension()
+            self.model = TextEmbedding(model_name=EMBEDDING_MODEL)
+            # Determine embedding dimension from a test encode
+            test = list(self.model.embed(["test"]))
+            self.semantic_dim = len(test[0])
+
+    def _encode(self, texts: list[str], normalize: bool = True) -> np.ndarray:
+        """Encode texts into embeddings using fastembed."""
+        embeddings = np.array(list(self.model.embed(texts)))
+        if normalize:
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1, norms)
+            embeddings = embeddings / norms
+        return embeddings.astype(np.float32)
 
     def _get_splitter(self, source: str) -> RecursiveCharacterTextSplitter:
         """Return a splitter tuned for the source type (pdf / youtube)."""
@@ -128,7 +139,7 @@ class KnowledgeBase:
         texts = [c["text"] for c in self.chunks]
 
         # Semantic embeddings
-        sem_embeddings = self.model.encode(texts, show_progress_bar=True, normalize_embeddings=True)
+        sem_embeddings = self._encode(texts, normalize=True)
 
         # Stylometric features (normalized)
         style_vectors = np.array([self.style_analyzer.to_vector(t) for t in texts])
@@ -208,7 +219,7 @@ class KnowledgeBase:
 
         keyword_results = self._keyword_chunks(query, n=2)
 
-        sem_query = self.model.encode([query], normalize_embeddings=True)
+        sem_query = self._encode([query], normalize=True)
         style_query = self.style_analyzer.to_vector(query).reshape(1, -1)
         norm = np.linalg.norm(style_query)
         if norm > 0:

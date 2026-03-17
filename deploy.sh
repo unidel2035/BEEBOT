@@ -34,11 +34,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
-pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# 5. Download embedding model
+# 5. Download embedding model (fastembed/ONNX)
 echo "Downloading embedding model..."
-python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')"
+python3 -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')"
 
 # 6. Setup .env
 if [ ! -f .env ]; then

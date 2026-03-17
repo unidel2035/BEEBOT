@@ -34,11 +34,14 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from src.integram_api import (
     IntegramAPI,
@@ -106,11 +109,28 @@ _CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()]
 # FastAPI app
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+
 app = FastAPI(
     title="BEEBOT — Веб-панель",
     description="Управление заказами «Усадьба Дмитровых»",
     version="2.0.0",
 )
+
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Слишком много запросов, попробуйте позже"},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -269,8 +289,13 @@ async def get_me(user: CurrentUser = Depends(_get_current_user)) -> dict:
 # Справочники
 # ---------------------------------------------------------------------------
 
-ORDER_STATUSES = ["Новый", "Подтверждён", "В сборке", "Отправлен", "Доставлен", "Отменён"]
-DELIVERY_METHODS = ["СДЭК", "Почта России", "Самовывоз"]
+from src.crm_constants import (
+    STATUS_IDS,
+    DELIVERY_IDS as DELIVERY_METHOD_IDS,
+    CATEGORY_IDS,
+    ORDER_STATUSES,
+    DELIVERY_METHODS,
+)
 
 @app.get("/api/reference", response_model=ReferenceData, tags=["reference"])
 async def get_reference(
@@ -300,7 +325,7 @@ async def get_dashboard(
             await integram.close()
     except IntegramAPIError as exc:
         logger.error("Ошибка Integram: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+        raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
 @app.get("/api/dashboard/charts", tags=["dashboard"])
@@ -386,7 +411,8 @@ async def get_dashboard_charts(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +438,8 @@ async def list_orders(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
 @app.get("/api/orders/{order_id}", tags=["orders"])
@@ -434,30 +461,15 @@ async def get_order(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
 # Обновление заказов (статус, трек-номер)
 # ---------------------------------------------------------------------------
 
-STATUS_IDS = {
-    "Новый": "1086",
-    "Подтверждён": "1087",
-    "В сборке": "1088",
-    "Отправлен": "1089",
-    "Доставлен": "1090",
-    "Отменён": "1091",
-}
-
-
 EDITABLE_STATUSES = {"Новый", "Подтверждён", "В сборке"}
-
-DELIVERY_METHOD_IDS = {
-    "СДЭК": "1092",
-    "Почта России": "1093",
-    "Самовывоз": "1094",
-}
 
 
 class StatusUpdate(BaseModel):
@@ -538,7 +550,8 @@ async def update_order_status(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.patch("/api/orders/{order_id}/tracking", tags=["orders"])
@@ -574,7 +587,8 @@ async def update_order_tracking(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +645,8 @@ async def update_order(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +667,8 @@ async def get_order_items(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.post("/api/orders/{order_id}/items", tags=["order-items"])
@@ -685,7 +701,8 @@ async def add_order_item(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.patch("/api/orders/{order_id}/items/{item_id}", tags=["order-items"])
@@ -723,7 +740,8 @@ async def update_order_item(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.delete("/api/orders/{order_id}/items/{item_id}", tags=["order-items"])
@@ -745,7 +763,8 @@ async def delete_order_item(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 async def _recalculate_totals(integram: IntegramAPI, order_id: int) -> None:
@@ -779,7 +798,8 @@ async def list_clients(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
 @app.get("/api/clients/{client_id}", tags=["clients"])
@@ -806,7 +826,8 @@ async def get_client(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
@@ -829,24 +850,13 @@ async def list_products(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(status_code=502, detail=f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
 # Товары: CRUD + остатки
 # ---------------------------------------------------------------------------
-
-CATEGORY_IDS = {
-    "Продукты пчеловодства": "1079",
-    "Настойки": "1080",
-    "Программы здоровья": "1081",
-    "Мёд": "1167",
-    "Наборы": "1168",
-    "Упаковка": "1169",
-    "Свечи": "1170",
-    "Чаи и травы": "1171",
-}
-
 
 class ProductCreate(BaseModel):
     name: str
@@ -908,7 +918,8 @@ async def create_product(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.patch("/api/products/{product_id}", tags=["products"])
@@ -952,7 +963,8 @@ async def update_product(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.delete("/api/products/{product_id}", tags=["products"])
@@ -971,7 +983,8 @@ async def delete_product(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.patch("/api/products/{product_id}/stock", tags=["products"])
@@ -991,7 +1004,8 @@ async def update_product_stock(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
@@ -1025,7 +1039,8 @@ async def list_users(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.post("/api/users", tags=["users"])
@@ -1052,7 +1067,8 @@ async def create_user_endpoint(
     except ValueError as e:
         raise HTTPException(400, str(e))
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.patch("/api/users/{user_id}", tags=["users"])
@@ -1081,7 +1097,8 @@ async def update_user_endpoint(
     except ValueError as e:
         raise HTTPException(400, str(e))
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
 @app.delete("/api/users/{user_id}", tags=["users"])
@@ -1098,4 +1115,5 @@ async def delete_user_endpoint(
         finally:
             await integram.close()
     except IntegramAPIError as exc:
-        raise HTTPException(502, f"Ошибка CRM: {exc}")
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")

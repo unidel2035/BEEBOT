@@ -105,10 +105,13 @@ async def calculate_delivery_cost(
     delivery_method: str,
     address: str,
     cart: list[dict],
-) -> float:
+) -> Optional[float]:
     """Рассчитать стоимость доставки через реальные API (СДЭК / Почта России).
 
     При ошибке API — автоматический fallback на фиксированный тариф.
+
+    Returns:
+        Стоимость доставки в рублях, или None если расчёт невозможен.
     """
     if delivery_method == "Самовывоз":
         return 0.0
@@ -128,7 +131,7 @@ async def calculate_delivery_cost(
         return quote.price
     except Exception as e:
         logger.warning("Ошибка расчёта доставки через API: %s", e)
-        return 0.0
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +295,8 @@ class LogistAgent:
             cost = await calculate_delivery_cost(method, address, cart)
             if method == "Самовывоз":
                 label = "🏪 Самовывоз — бесплатно"
+            elif cost is None:
+                label = f"🚚 {method} — не удалось рассчитать"
             else:
                 label = f"🚚 {method} — {cost:.0f} ₽"
             options.append({"method": method, "cost": cost, "label": label})

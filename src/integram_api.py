@@ -235,16 +235,34 @@ class IntegramAPI:
 
         logger.info("Integram авторизация OK (user_id=%s)", data.get("id"))
 
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """HTTP-запрос с автоматической повторной авторизацией при 401/403."""
+        http = await self._get_http()
+        kwargs.setdefault("cookies", {_DB: self._token or ""})
+        resp = await getattr(http, method)(url, **kwargs)
+
+        if resp.status_code in (401, 403) and self._token:
+            logger.warning("Integram сессия истекла, повторная авторизация...")
+            await self.authenticate()
+            kwargs["cookies"] = {_DB: self._token or ""}
+            resp = await getattr(http, method)(url, **kwargs)
+
+        resp.raise_for_status()
+        return resp
+
     async def _get_table_page(
         self,
         table_id: int,
         pg: int = 1,
     ) -> dict:
         """Получить страницу таблицы (pg=1 — первая)."""
-        http = await self._get_http()
         url = f"/{_DB}/object/{table_id}/?JSON&F_U=1&pg={pg}"
-        resp = await http.get(url, cookies={_DB: self._token or ""})
-        resp.raise_for_status()
+        resp = await self._request("get", url)
         return resp.json()
 
     async def get_all_objects(self, table_id: int) -> list[dict[str, Any]]:
@@ -314,7 +332,6 @@ class IntegramAPI:
             value:       Название объекта (главное поле).
             requisites:  Реквизиты {req_id: значение}. Для reference — ID объекта.
         """
-        http = await self._get_http()
         form: dict[str, str] = {
             "_xsrf": self._xsrf or "",
             f"t{table_id}": value,
@@ -324,13 +341,12 @@ class IntegramAPI:
             for req_id, val in requisites.items():
                 form[f"t{req_id}"] = str(val)
 
-        resp = await http.post(
+        resp = await self._request(
+            "post",
             f"/{_DB}/_m_new/{table_id}?JSON",
             data=form,
-            cookies={_DB: self._token or ""},
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        resp.raise_for_status()
         data = resp.json()
         obj_id = data.get("obj") or data.get("id")
         if not obj_id:
@@ -350,16 +366,10 @@ class IntegramAPI:
 
         Формат: t{typeId}=value, t{reqId}=reqValue.
         """
-        http = await self._get_http()
-        cookies = {_DB: self._token or ""}
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
         # Получить текущее значение и тип объекта
-        edit_resp = await http.get(
-            f"/{_DB}/edit_obj/{obj_id}?JSON",
-            cookies=cookies,
-        )
-        edit_resp.raise_for_status()
+        edit_resp = await self._request("get", f"/{_DB}/edit_obj/{obj_id}?JSON")
         edit_data = edit_resp.json()
         obj_meta = edit_data.get("obj", {})
         type_id = obj_meta.get("typ", str(table_id))
@@ -372,43 +382,34 @@ class IntegramAPI:
         for req_id, val in requisites.items():
             form[f"t{req_id}"] = str(val)
 
-        resp = await http.post(
+        await self._request(
+            "post",
             f"/{_DB}/_m_save/{obj_id}?JSON",
             data=form,
-            cookies=cookies,
             headers=headers,
         )
-        resp.raise_for_status()
 
     async def delete_object(self, obj_id: int) -> None:
         """Удалить объект по ID.
 
         Использует endpoint _m_del/{objectId}?JSON.
         """
-        http = await self._get_http()
-        resp = await http.post(
+        await self._request(
+            "post",
             f"/{_DB}/_m_del/{obj_id}?JSON",
             data={"_xsrf": self._xsrf or ""},
-            cookies={_DB: self._token or ""},
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        resp.raise_for_status()
         logger.info("Integram: удалён объект id=%d", obj_id)
 
     async def update_object_value(self, obj_id: int, new_value: str) -> None:
         """Обновить главное поле (val) объекта через _m_save."""
-        http = await self._get_http()
-        data = {
-            "_xsrf": self._xsrf or "",
-            "t_val": new_value,
-        }
-        resp = await http.post(
+        await self._request(
+            "post",
             f"/{_DB}/_m_save/{obj_id}?JSON",
-            data=data,
-            cookies={_DB: self._token or ""},
+            data={"_xsrf": self._xsrf or "", "t_val": new_value},
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        resp.raise_for_status()
         logger.info("Integram: обновлён val объекта id=%d → '%s'", obj_id, new_value)
 
     async def get_order_items(self, order_id: Optional[int] = None) -> list[dict[str, Any]]:

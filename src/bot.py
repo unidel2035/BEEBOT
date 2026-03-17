@@ -57,10 +57,11 @@ analyst = AnalystAgent(
     groq_model=orchestrator._model,
 )
 
-# Инициализировать админ-модуль (CRM подключается позже в main())
+# Инициализировать админ-модуль без CRM (CRM подключается в main())
 setup_admin(bot)
 
 # Хранилище задач таймаута (user_id → asyncio.Task)
+_timeout_lock = asyncio.Lock()
 _timeout_tasks: dict[int, asyncio.Task] = {}
 
 WELCOME_MESSAGE = """Привет! Я бот-помощник Александра Дмитрова — пчеловода и автора блога о продуктах пчеловодства.
@@ -476,9 +477,10 @@ async def cb_edit_order(callback: types.CallbackQuery):
 # ===========================================================================
 
 
-def _cancel_timeout(user_id: int) -> None:
+async def _cancel_timeout(user_id: int) -> None:
     """Отменить задачу таймаута для пользователя."""
-    task = _timeout_tasks.pop(user_id, None)
+    async with _timeout_lock:
+        task = _timeout_tasks.pop(user_id, None)
     if task and not task.done():
         task.cancel()
 
@@ -489,7 +491,8 @@ async def _timeout_dialog(user_id: int, chat_id: int, state: FSMContext) -> None
     current = await state.get_state()
     if current is not None:
         await state.clear()
-        _timeout_tasks.pop(user_id, None)
+        async with _timeout_lock:
+            _timeout_tasks.pop(user_id, None)
         try:
             await bot.send_message(
                 chat_id,
@@ -501,11 +504,12 @@ async def _timeout_dialog(user_id: int, chat_id: int, state: FSMContext) -> None
             logger.warning("Не удалось отправить сообщение о таймауте: %s", e)
 
 
-def _reset_timeout(user_id: int, chat_id: int, state: FSMContext) -> None:
+async def _reset_timeout(user_id: int, chat_id: int, state: FSMContext) -> None:
     """Сбросить таймаут — отменить старый и запустить новый."""
-    _cancel_timeout(user_id)
+    await _cancel_timeout(user_id)
     task = asyncio.create_task(_timeout_dialog(user_id, chat_id, state))
-    _timeout_tasks[user_id] = task
+    async with _timeout_lock:
+        _timeout_tasks[user_id] = task
 
 
 # ===========================================================================
@@ -560,7 +564,7 @@ async def cmd_order(message: types.Message, state: FSMContext) -> None:
     await state.update_data(products=products_data, cart=[])
     await state.set_state(OrderFSM.choosing_product)
 
-    _reset_timeout(user_id, chat_id, state)
+    await _reset_timeout(user_id, chat_id, state)
     await message.answer(catalog_text, parse_mode="Markdown")
 
 
@@ -572,7 +576,7 @@ async def cmd_order(message: types.Message, state: FSMContext) -> None:
 @dp.message(Command("cancel"), StateFilter(OrderFSM))
 async def cmd_cancel_order(message: types.Message, state: FSMContext) -> None:
     """Отменить диалог оформления заказа."""
-    _cancel_timeout(message.from_user.id)
+    await _cancel_timeout(message.from_user.id)
     await state.clear()
     await message.answer(
         "Заказ отменён. Напишите /order чтобы начать заново.",
@@ -611,7 +615,7 @@ async def fsm_choose_product(message: types.Message, state: FSMContext) -> None:
             await state.update_data(prefill_name=name)
 
     await state.set_state(OrderFSM.entering_name)
-    _reset_timeout(user_id, message.chat.id, state)
+    await _reset_timeout(user_id, message.chat.id, state)
     await message.answer(
         f"Отлично! Введите ваше *ФИО* (Фамилия Имя Отчество).{prefill}",
         parse_mode="Markdown",
@@ -638,7 +642,7 @@ async def fsm_enter_name(message: types.Message, state: FSMContext) -> None:
 
     await state.update_data(full_name=name)
     await state.set_state(OrderFSM.entering_phone)
-    _reset_timeout(message.from_user.id, message.chat.id, state)
+    await _reset_timeout(message.from_user.id, message.chat.id, state)
     await message.answer("📞 Введите ваш *номер телефона*:", parse_mode="Markdown")
 
 
@@ -673,7 +677,7 @@ async def fsm_enter_phone(message: types.Message, state: FSMContext) -> None:
         await state.update_data(prefill_address=existing_client.address)
 
     await state.set_state(OrderFSM.entering_address)
-    _reset_timeout(message.from_user.id, message.chat.id, state)
+    await _reset_timeout(message.from_user.id, message.chat.id, state)
     await message.answer(
         f"🏠 Введите *адрес доставки* (город, улица, дом, квартира).{prefill}",
         parse_mode="Markdown",
@@ -703,7 +707,7 @@ async def fsm_enter_address(message: types.Message, state: FSMContext) -> None:
 
     await state.update_data(address=address, delivery_options=options)
     await state.set_state(OrderFSM.choosing_delivery)
-    _reset_timeout(message.from_user.id, message.chat.id, state)
+    await _reset_timeout(message.from_user.id, message.chat.id, state)
 
     keyboard = _delivery_keyboard(options)
     options_text = "\n".join(f"  {opt['label']}" for opt in options)
@@ -759,7 +763,7 @@ async def fsm_choose_delivery(message: types.Message, state: FSMContext) -> None
 
     await state.update_data(delivery=chosen, delivery_cost=chosen_cost)
     await state.set_state(OrderFSM.confirming_order)
-    _reset_timeout(message.from_user.id, message.chat.id, state)
+    await _reset_timeout(message.from_user.id, message.chat.id, state)
 
     await message.answer(
         summary,
@@ -782,7 +786,7 @@ async def fsm_confirm_order(message: types.Message, state: FSMContext) -> None:
         await state.set_state(OrderFSM.creating_order)
         await _do_create_order(message, state)
     elif answer in ("нет", "❌ нет, отменить", "no", "отменить", "-"):
-        _cancel_timeout(message.from_user.id)
+        await _cancel_timeout(message.from_user.id)
         await state.clear()
         await message.answer(
             "Заказ отменён. Напишите /order чтобы начать заново.",
@@ -803,7 +807,7 @@ async def fsm_confirm_order(message: types.Message, state: FSMContext) -> None:
 
 async def _do_create_order(message: types.Message, state: FSMContext) -> None:
     """Создать заказ в Integram и уведомить пчеловода."""
-    _cancel_timeout(message.from_user.id)
+    await _cancel_timeout(message.from_user.id)
     data = await state.get_data()
     await state.clear()
 

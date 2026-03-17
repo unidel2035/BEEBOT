@@ -46,38 +46,10 @@ from src.integram_api import (
     REQ_ITEM_PRODUCT,
     REQ_ITEM_ORDER,
 )
+from src.crm_constants import STATUS_IDS, DELIVERY_IDS, SOURCE_IDS
 from src.models import Client, Order, OrderItem, Product
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Справочники Integram (object ID → значение)
-# ---------------------------------------------------------------------------
-
-STATUS_IDS = {
-    "Новый": "1086",
-    "Подтверждён": "1087",
-    "В сборке": "1088",
-    "Отправлен": "1089",
-    "Доставлен": "1090",
-    "Отменён": "1091",
-}
-
-DELIVERY_IDS = {
-    "СДЭК": "1092",
-    "Почта России": "1093",
-    "Самовывоз": "1094",
-}
-
-SOURCE_IDS = {
-    "Telegram": "1082",
-    "UDS": "1083",
-    "WhatsApp": "1084",
-    "Ручной ввод": "1085",
-    "ВК": "3176",
-    "Instagram": "3177",
-}
 
 
 class IntegramError(Exception):

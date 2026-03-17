@@ -6,6 +6,11 @@ services:
     network_mode: host
     env_file:
       - .env
+    environment:
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - TOKENIZERS_PARALLELISM=false
     volumes:
       - ./data/processed:/app/data/processed
       - ./data/subtitles:/app/data/subtitles

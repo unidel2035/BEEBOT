@@ -7,12 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Python dependencies
+# Install PyTorch CPU-only FIRST (before requirements.txt pulls CUDA version)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Python dependencies (torch already installed — pip will skip it)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install PyTorch CPU-only (smaller image)
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
 # Download embedding model at build time
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')"

@@ -68,7 +68,8 @@ async function handleLogin() {
   loading.value = true
   try {
     await auth.login(username.value, password.value)
-    const redirect = route.query.redirect || '/dashboard'
+    const defaultHome = auth.isWarehouse ? '/packing' : '/dashboard'
+    const redirect = route.query.redirect || defaultHome
     router.push(redirect)
   } catch (e) {
     error.value = 'Неверный логин или пароль'

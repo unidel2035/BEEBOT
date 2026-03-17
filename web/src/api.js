@@ -43,6 +43,11 @@ export async function login(username, password) {
   return data
 }
 
+export async function getMe() {
+  const { data } = await http.get('/auth/me')
+  return data
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
@@ -172,5 +177,29 @@ export async function deleteProduct(id) {
 
 export async function updateStock(productId, stock) {
   const { data } = await http.patch(`/products/${productId}/stock`, { stock })
+  return data
+}
+
+// ---------------------------------------------------------------------------
+// Users (Пользователи)
+// ---------------------------------------------------------------------------
+
+export async function getUsers() {
+  const { data } = await http.get('/users')
+  return data
+}
+
+export async function createUser(body) {
+  const { data } = await http.post('/users', body)
+  return data
+}
+
+export async function updateUser(id, body) {
+  const { data } = await http.patch(`/users/${id}`, body)
+  return data
+}
+
+export async function deleteUser(id) {
+  const { data } = await http.delete(`/users/${id}`)
   return data
 }

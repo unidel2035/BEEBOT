@@ -2,27 +2,35 @@
 
 Эндпоинты:
   POST /api/auth/token          — получить JWT по логину/паролю
-  GET  /api/dashboard           — статистика (новые заказы, выручка за день/неделю)
-  GET  /api/orders              — список заказов (фильтр по статусу, клиенту)
-  GET  /api/orders/{id}         — заказ по ID
-  PATCH /api/orders/{id}/status   — сменить статус заказа
-  PATCH /api/orders/{id}/tracking — ввести трек-номер
-  GET  /api/clients             — список клиентов
-  GET  /api/clients/{id}        — клиент + история заказов
-  GET  /api/products            — список товаров
-  GET  /api/reference           — справочники (статусы, способы доставки)
+  GET  /api/auth/me             — текущий пользователь (username, role)
+  GET  /api/dashboard           — статистика (admin)
+  GET  /api/orders              — список заказов (admin + warehouse)
+  GET  /api/orders/{id}         — заказ по ID (admin + warehouse)
+  PATCH /api/orders/{id}/status — сменить статус заказа (admin; warehouse ограничен)
+  PATCH /api/orders/{id}/tracking — ввести трек-номер (admin)
+  GET  /api/clients             — список клиентов (admin)
+  GET  /api/clients/{id}        — клиент + история заказов (admin)
+  GET  /api/products            — список товаров (admin + warehouse)
+  PATCH /api/products/{id}/stock — обновить остаток (admin + warehouse)
+  GET  /api/users               — список пользователей (admin)
+  POST /api/users               — создать пользователя (admin)
+  PATCH /api/users/{id}         — обновить пользователя (admin)
+  DELETE /api/users/{id}        — деактивировать пользователя (admin)
+  GET  /api/reference           — справочники (admin + warehouse)
 
 Конфигурация через .env:
-  WEB_USERNAME  — логин администратора (по умолчанию: admin)
-  WEB_PASSWORD  — пароль администратора (по умолчанию: changeme)
-  WEB_SECRET    — секрет JWT (по умолчанию: dev-secret-change-in-production)
+  WEB_USERNAME  — логин администратора-фоллбэк (по умолчанию: admin)
+  WEB_PASSWORD  — пароль администратора-фоллбэк (по умолчанию: changeme)
+  WEB_SECRET    — секрет JWT (генерируется при отсутствии)
   WEB_TOKEN_TTL — время жизни токена в минутах (по умолчанию: 60)
+  WEB_CORS_ORIGINS — разрешённые домены через запятую (по умолчанию: *)
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -62,6 +70,15 @@ from src.integram_api import (
     REQ_PRODUCT_STOCK,
 )
 from src.web.notifications import notify_client_status_change, notify_client_tracking
+from src.web.users import (
+    get_user_by_username,
+    get_all_users,
+    create_user,
+    update_user as update_user_service,
+    delete_user as delete_user_service,
+    verify_password,
+    VALID_ROLES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +88,19 @@ logger = logging.getLogger(__name__)
 
 _WEB_USERNAME = os.getenv("WEB_USERNAME", "admin")
 _WEB_PASSWORD = os.getenv("WEB_PASSWORD", "changeme")
-_WEB_SECRET = os.getenv("WEB_SECRET", "dev-secret-change-in-production")
+_WEB_SECRET = os.getenv("WEB_SECRET", "")
+if not _WEB_SECRET:
+    _WEB_SECRET = secrets.token_hex(32)
+    logger.warning("WEB_SECRET не задан — сгенерирован случайный ключ (токены сбросятся при перезапуске)")
 _TOKEN_TTL = int(os.getenv("WEB_TOKEN_TTL", "60"))  # minutes
 _ALGORITHM = "HS256"
+
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+
+_CORS_ORIGINS_RAW = os.getenv("WEB_CORS_ORIGINS", "*")
+_CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()]
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -82,12 +109,12 @@ _ALGORITHM = "HS256"
 app = FastAPI(
     title="BEEBOT — Веб-панель",
     description="Управление заказами «Усадьба Дмитровых»",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -102,6 +129,11 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class CurrentUser(BaseModel):
+    username: str
+    role: str  # "admin" | "warehouse"
 
 
 class DashboardStats(BaseModel):
@@ -122,13 +154,13 @@ class ReferenceData(BaseModel):
 # JWT helpers
 # ---------------------------------------------------------------------------
 
-def _create_token(username: str) -> str:
+def _create_token(username: str, role: str = "admin") -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=_TOKEN_TTL)
-    payload = {"sub": username, "exp": expire}
+    payload = {"sub": username, "role": role, "exp": expire}
     return jwt.encode(payload, _WEB_SECRET, algorithm=_ALGORITHM)
 
 
-async def _get_current_user(token: str = Depends(oauth2_scheme)) -> str:
+async def _get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
     credentials_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Неверный или просроченный токен",
@@ -139,9 +171,22 @@ async def _get_current_user(token: str = Depends(oauth2_scheme)) -> str:
         username: Optional[str] = payload.get("sub")
         if username is None:
             raise credentials_exc
+        role = payload.get("role", "admin")
     except JWTError:
         raise credentials_exc
-    return username
+    return CurrentUser(username=username, role=role)
+
+
+def _require_role(*roles: str):
+    """Фабрика зависимостей: проверить что роль пользователя в списке."""
+    async def checker(user: CurrentUser = Depends(_get_current_user)) -> CurrentUser:
+        if user.role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Недостаточно прав",
+            )
+        return user
+    return checker
 
 
 # ---------------------------------------------------------------------------
@@ -185,15 +230,39 @@ async def _get_client_telegram_id(integram: IntegramAPI, client_id: Optional[int
 
 @app.post("/api/auth/token", response_model=TokenResponse, tags=["auth"])
 async def login(form_data: OAuth2PasswordRequestForm = Depends()) -> TokenResponse:
-    """Получить JWT-токен по логину и паролю администратора."""
-    if form_data.username != _WEB_USERNAME or form_data.password != _WEB_PASSWORD:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный логин или пароль",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    token = _create_token(form_data.username)
-    return TokenResponse(access_token=token)
+    """Получить JWT-токен по логину и паролю."""
+    credentials_exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Неверный логин или пароль",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    # 1. Попробовать найти пользователя в CRM
+    try:
+        integram = await _get_integram()
+        try:
+            user = await get_user_by_username(integram, form_data.username)
+        finally:
+            await integram.close()
+
+        if user and user.get("active") and verify_password(form_data.password, user["password_hash"]):
+            token = _create_token(user["username"], role=user["role"])
+            return TokenResponse(access_token=token)
+    except Exception as e:
+        logger.warning("Ошибка поиска пользователя в CRM: %s", e)
+
+    # 2. Фоллбэк: проверить env-переменные (для обратной совместимости)
+    if form_data.username == _WEB_USERNAME and form_data.password == _WEB_PASSWORD:
+        token = _create_token(form_data.username, role="admin")
+        return TokenResponse(access_token=token)
+
+    raise credentials_exc
+
+
+@app.get("/api/auth/me", tags=["auth"])
+async def get_me(user: CurrentUser = Depends(_get_current_user)) -> dict:
+    """Информация о текущем пользователе."""
+    return {"username": user.username, "role": user.role}
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +274,7 @@ DELIVERY_METHODS = ["СДЭК", "Почта России", "Самовывоз"]
 
 @app.get("/api/reference", response_model=ReferenceData, tags=["reference"])
 async def get_reference(
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
 ) -> ReferenceData:
     return ReferenceData(
         order_statuses=ORDER_STATUSES,
@@ -219,7 +288,7 @@ async def get_reference(
 
 @app.get("/api/dashboard", response_model=DashboardStats, tags=["dashboard"])
 async def get_dashboard(
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> DashboardStats:
     """Статистика за день и неделю."""
     try:
@@ -236,7 +305,7 @@ async def get_dashboard(
 
 @app.get("/api/dashboard/charts", tags=["dashboard"])
 async def get_dashboard_charts(
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict[str, Any]:
     """Данные для графиков дашборда: выручка по месяцам, воронка статусов, доставка."""
     import re
@@ -328,7 +397,7 @@ async def get_dashboard_charts(
 async def list_orders(
     status: Optional[str] = None,
     client_id: Optional[int] = None,
-    _: str = Depends(_get_current_user),
+    user: CurrentUser = Depends(_require_role("admin", "warehouse")),
 ) -> list[dict[str, Any]]:
     """Список заказов."""
     try:
@@ -349,7 +418,7 @@ async def list_orders(
 @app.get("/api/orders/{order_id}", tags=["orders"])
 async def get_order(
     order_id: int,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
 ) -> dict[str, Any]:
     """Получить заказ по ID с позициями."""
     try:
@@ -417,11 +486,18 @@ class ItemUpdate(BaseModel):
     unit_price: Optional[float] = None
 
 
+# Переходы статусов, доступные складу
+_WAREHOUSE_STATUS_TRANSITIONS = {
+    ("Подтверждён", "В сборке"),
+    ("В сборке", "Отправлен"),
+}
+
+
 @app.patch("/api/orders/{order_id}/status", tags=["orders"])
 async def update_order_status(
     order_id: int,
     body: StatusUpdate,
-    _: str = Depends(_get_current_user),
+    user: CurrentUser = Depends(_require_role("admin", "warehouse")),
 ) -> dict:
     """Сменить статус заказа и уведомить клиента в Telegram."""
     if body.status not in STATUS_IDS:
@@ -429,6 +505,15 @@ async def update_order_status(
     try:
         integram = await _get_integram()
         try:
+            # Проверка прав warehouse: только разрешённые переходы
+            if user.role == "warehouse":
+                order = await _find_order(integram, order_id)
+                if not order:
+                    raise HTTPException(404, "Заказ не найден")
+                current_status = order.get("status", "")
+                if (current_status, body.status) not in _WAREHOUSE_STATUS_TRANSITIONS:
+                    raise HTTPException(403, f"Склад не может менять статус с «{current_status}» на «{body.status}»")
+
             await integram.set_requisites(order_id, TABLE_ORDERS, {
                 REQ_ORDER_STATUS: STATUS_IDS[body.status],
             })
@@ -460,7 +545,7 @@ async def update_order_status(
 async def update_order_tracking(
     order_id: int,
     body: TrackingUpdate,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict:
     """Ввести трек-номер и уведомить клиента."""
     try:
@@ -514,7 +599,7 @@ async def _check_editable(integram: IntegramAPI, order_id: int) -> dict:
 async def update_order(
     order_id: int,
     body: OrderUpdate,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict:
     """Обновить поля заказа (адрес, доставку, комментарий)."""
     try:
@@ -557,7 +642,7 @@ async def update_order(
 @app.get("/api/orders/{order_id}/items", tags=["order-items"])
 async def get_order_items(
     order_id: int,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
 ) -> list[dict]:
     """Получить позиции заказа."""
     try:
@@ -574,7 +659,7 @@ async def get_order_items(
 async def add_order_item(
     order_id: int,
     body: ItemCreate,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict:
     """Добавить позицию к заказу."""
     try:
@@ -608,7 +693,7 @@ async def update_order_item(
     order_id: int,
     item_id: int,
     body: ItemUpdate,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict:
     """Изменить количество/цену позиции."""
     try:
@@ -645,7 +730,7 @@ async def update_order_item(
 async def delete_order_item(
     order_id: int,
     item_id: int,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict:
     """Удалить позицию из заказа."""
     try:
@@ -684,7 +769,7 @@ async def _recalculate_totals(integram: IntegramAPI, order_id: int) -> None:
 
 @app.get("/api/clients", tags=["clients"])
 async def list_clients(
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> list[dict[str, Any]]:
     """Список всех клиентов."""
     try:
@@ -700,7 +785,7 @@ async def list_clients(
 @app.get("/api/clients/{client_id}", tags=["clients"])
 async def get_client(
     client_id: int,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict[str, Any]:
     """Клиент + история заказов."""
     try:
@@ -731,7 +816,7 @@ async def get_client(
 @app.get("/api/products", tags=["products"])
 async def list_products(
     in_stock_only: bool = False,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
 ) -> list[dict[str, Any]]:
     """Список всех товаров."""
     try:
@@ -794,7 +879,7 @@ class StockUpdate(BaseModel):
 @app.post("/api/products", tags=["products"])
 async def create_product(
     body: ProductCreate,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict:
     """Создать товар."""
     try:
@@ -830,7 +915,7 @@ async def create_product(
 async def update_product(
     product_id: int,
     body: ProductUpdate,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict:
     """Обновить товар."""
     try:
@@ -873,7 +958,7 @@ async def update_product(
 @app.delete("/api/products/{product_id}", tags=["products"])
 async def delete_product(
     product_id: int,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict:
     """Снять товар с продажи (in_stock = false)."""
     try:
@@ -893,7 +978,7 @@ async def delete_product(
 async def update_product_stock(
     product_id: int,
     body: StockUpdate,
-    _: str = Depends(_get_current_user),
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
 ) -> dict:
     """Обновить остаток товара на складе."""
     try:
@@ -903,6 +988,113 @@ async def update_product_stock(
                 REQ_PRODUCT_STOCK: str(body.stock),
             })
             return {"ok": True, "product_id": product_id, "stock": body.stock}
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Пользователи (только admin)
+# ---------------------------------------------------------------------------
+
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    role: str
+    display_name: str = ""
+
+
+class UserUpdate(BaseModel):
+    password: Optional[str] = None
+    role: Optional[str] = None
+    display_name: Optional[str] = None
+    active: Optional[bool] = None
+
+
+@app.get("/api/users", tags=["users"])
+async def list_users(
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> list[dict[str, Any]]:
+    """Список всех пользователей."""
+    try:
+        integram = await _get_integram()
+        try:
+            return await get_all_users(integram)
+        finally:
+            await integram.close()
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.post("/api/users", tags=["users"])
+async def create_user_endpoint(
+    body: UserCreate,
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> dict:
+    """Создать пользователя."""
+    if body.role not in VALID_ROLES:
+        raise HTTPException(400, f"Недопустимая роль: {body.role}. Допустимые: {', '.join(VALID_ROLES)}")
+    try:
+        integram = await _get_integram()
+        try:
+            user_id = await create_user(
+                integram,
+                username=body.username,
+                password=body.password,
+                role=body.role,
+                display_name=body.display_name,
+            )
+            return {"ok": True, "user_id": user_id}
+        finally:
+            await integram.close()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.patch("/api/users/{user_id}", tags=["users"])
+async def update_user_endpoint(
+    user_id: int,
+    body: UserUpdate,
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> dict:
+    """Обновить пользователя (роль, пароль, активность)."""
+    if body.role is not None and body.role not in VALID_ROLES:
+        raise HTTPException(400, f"Недопустимая роль: {body.role}")
+    try:
+        integram = await _get_integram()
+        try:
+            await update_user_service(
+                integram,
+                user_id,
+                password=body.password,
+                role=body.role,
+                display_name=body.display_name,
+                active=body.active,
+            )
+            return {"ok": True, "user_id": user_id}
+        finally:
+            await integram.close()
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except IntegramAPIError as exc:
+        raise HTTPException(502, f"Ошибка CRM: {exc}")
+
+
+@app.delete("/api/users/{user_id}", tags=["users"])
+async def delete_user_endpoint(
+    user_id: int,
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> dict:
+    """Деактивировать пользователя."""
+    try:
+        integram = await _get_integram()
+        try:
+            await delete_user_service(integram, user_id)
+            return {"ok": True, "user_id": user_id}
         finally:
             await integram.close()
     except IntegramAPIError as exc:

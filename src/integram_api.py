@@ -87,6 +87,14 @@ REQ_PRODUCT_CATEGORY = "1067"
 REQ_PRODUCT_SHORT = "1173"
 REQ_PRODUCT_STOCK = "4850"
 
+# Таблица пользователей веб-панели
+TABLE_USERS = 4964
+REQ_USER_PASSWORD_HASH = "4966"
+REQ_USER_ROLE_OLD = "4967"  # SHORT — не работает (Integram конвертирует в ссылку)
+REQ_USER_ROLE = "4983"      # LONG text — «Уровень доступа»
+REQ_USER_DISPLAY_NAME = "4969"
+REQ_USER_ACTIVE = "4971"
+
 
 class IntegramAPIError(Exception):
     """Ошибка при работе с Integram API."""

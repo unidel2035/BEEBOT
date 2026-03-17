@@ -341,26 +341,7 @@ async def _get_or_create_client_by_phone(
     name: str,
 ) -> Any:
     """Найти клиента в Integram по телефону или создать нового."""
-    from src.integram_client import IntegramNotFoundError
-
-    if phone:
-        try:
-            # Попробовать найти клиента по телефону через поиск
-            data = await integram_client._request(
-                "GET",
-                "/api/clients",
-                params={"phone": phone},
-            )
-            clients_raw = data if isinstance(data, list) else data.get("items", data.get("data", []))
-            if clients_raw:
-                from src.integram_client import IntegramClient
-                return IntegramClient._parse_client(clients_raw[0])
-        except IntegramNotFoundError:
-            pass
-        except Exception as e:
-            logger.warning("UDS: поиск клиента по телефону %s не удался: %s", phone, e)
-
-    # Создать нового клиента
+    # get_or_create_client уже ищет по телефону и создаёт при отсутствии
     return await integram_client.get_or_create_client(
         telegram_id=0,  # UDS-клиент без Telegram
         full_name=name,

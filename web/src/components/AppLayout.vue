@@ -16,7 +16,7 @@
       <!-- Навигация -->
       <nav class="flex-1 px-3 py-4 space-y-1">
         <RouterLink
-          v-for="item in navItems"
+          v-for="item in visibleNavItems"
           :key="item.to"
           :to="item.to"
           class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors"
@@ -33,8 +33,12 @@
         </RouterLink>
       </nav>
 
-      <!-- Выход -->
-      <div class="px-3 py-4 border-t border-gray-100">
+      <!-- Пользователь + Выход -->
+      <div class="px-3 py-4 border-t border-gray-100 space-y-2">
+        <div class="px-3 py-1">
+          <div class="text-sm font-medium text-gray-700 truncate">{{ auth.displayName || auth.role }}</div>
+          <div class="text-xs text-gray-400">{{ roleName }}</div>
+        </div>
         <button
           @click="handleLogout"
           class="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors"
@@ -55,6 +59,7 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { useRoute, useRouter, RouterLink, RouterView } from 'vue-router'
 import { useAuthStore } from '../stores/auth.js'
 
@@ -62,16 +67,26 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-const navItems = [
-  { to: '/dashboard', icon: 'pi-chart-bar', label: 'Дашборд' },
-  { to: '/journal', icon: 'pi-calendar', label: 'Журнал по месяцам' },
-  { to: '/orders', icon: 'pi-shopping-cart', label: 'Заказы' },
-  { to: '/clients', icon: 'pi-users', label: 'Клиенты' },
-  { to: '/products', icon: 'pi-box', label: 'Товары' },
-  { to: '/orders/new', icon: 'pi-plus-circle', label: 'Новый заказ' },
-  { to: '/packing', icon: 'pi-box', label: 'Сборка' },
-  { to: '/stock', icon: 'pi-warehouse', label: 'Склад' }
+const allNavItems = [
+  { to: '/dashboard', icon: 'pi-chart-bar', label: 'Дашборд', roles: ['admin'] },
+  { to: '/journal', icon: 'pi-calendar', label: 'Журнал по месяцам', roles: ['admin'] },
+  { to: '/orders', icon: 'pi-shopping-cart', label: 'Заказы', roles: ['admin'] },
+  { to: '/clients', icon: 'pi-users', label: 'Клиенты', roles: ['admin'] },
+  { to: '/products', icon: 'pi-box', label: 'Товары', roles: ['admin'] },
+  { to: '/orders/new', icon: 'pi-plus-circle', label: 'Новый заказ', roles: ['admin'] },
+  { to: '/packing', icon: 'pi-box', label: 'Сборка', roles: ['admin', 'warehouse'] },
+  { to: '/stock', icon: 'pi-warehouse', label: 'Склад', roles: ['admin', 'warehouse'] },
+  { to: '/users', icon: 'pi-cog', label: 'Пользователи', roles: ['admin'] },
 ]
+
+const visibleNavItems = computed(() =>
+  allNavItems.filter(item => item.roles.includes(auth.role))
+)
+
+const roleName = computed(() => {
+  const names = { admin: 'Администратор', warehouse: 'Склад' }
+  return names[auth.role] || auth.role
+})
 
 function isActive(path) {
   if (path === '/dashboard' || path === '/journal') return route.path === path

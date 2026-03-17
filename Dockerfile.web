@@ -28,7 +28,9 @@ RUN pip install --no-cache-dir \
     "python-jose[cryptography]==3.3.0" \
     httpx==0.28.1 \
     pydantic==2.11.1 \
-    python-dotenv==1.2.2
+    python-dotenv==1.2.2 \
+    "bcrypt>=4.0,<6.0" \
+    "slowapi>=0.1,<1.0"
 
 # Copy application source (only web-related modules)
 COPY src/ src/

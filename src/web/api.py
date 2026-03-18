@@ -90,7 +90,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _WEB_USERNAME = os.getenv("WEB_USERNAME", "admin")
-_WEB_PASSWORD = os.getenv("WEB_PASSWORD", "changeme")
+_WEB_PASSWORD = os.getenv("WEB_PASSWORD", "")
+if not _WEB_PASSWORD:
+    raise RuntimeError(
+        "WEB_PASSWORD не задан! Установите переменную окружения WEB_PASSWORD в .env"
+    )
 _WEB_SECRET = os.getenv("WEB_SECRET", "")
 if not _WEB_SECRET:
     _WEB_SECRET = secrets.token_hex(32)
@@ -102,7 +106,7 @@ _ALGORITHM = "HS256"
 # CORS
 # ---------------------------------------------------------------------------
 
-_CORS_ORIGINS_RAW = os.getenv("WEB_CORS_ORIGINS", "*")
+_CORS_ORIGINS_RAW = os.getenv("WEB_CORS_ORIGINS", "http://185.233.200.13:8088,http://localhost:5173")
 _CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()]
 
 # ---------------------------------------------------------------------------
@@ -130,6 +134,17 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(
         status_code=429,
         content={"detail": "Слишком много запросов, попробуйте позже"},
+    )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Не отдавать внутренние traceback клиенту."""
+    from fastapi.responses import JSONResponse
+    logger.error("Необработанная ошибка: %s %s — %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Внутренняя ошибка сервера"},
     )
 
 app.add_middleware(

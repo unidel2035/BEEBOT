@@ -38,6 +38,7 @@ Intent = Literal["consult", "order", "edit", "track", "stats", "greeting"]
 # ---------------------------------------------------------------------------
 
 _DIALOG_TTL_SECONDS = 30 * 60  # 30 minutes
+_MAX_HISTORY = 5  # максимум пар сообщений в истории
 
 
 class DialogState(TypedDict):
@@ -51,6 +52,15 @@ class DialogState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
+# Conversation history (per user)
+# ---------------------------------------------------------------------------
+
+class _ConversationMessage(TypedDict):
+    role: str      # "user" или "assistant"
+    content: str
+
+
+# ---------------------------------------------------------------------------
 # LangGraph state for a single routing run
 # ---------------------------------------------------------------------------
 
@@ -60,6 +70,7 @@ class OrchestratorState(TypedDict):
     intent: str          # classified intent
     response: str        # final response text
     chunks: list[dict]   # knowledge base chunks (from BEEBOT)
+    history: list[dict]  # conversation history for LLM
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +184,8 @@ class Orchestrator:
 
         # In-memory dialog state per user_id
         self._dialog_states: dict[int, DialogState] = {}
+        # Conversation history per user_id (last N messages)
+        self._histories: dict[int, list[_ConversationMessage]] = {}
 
         self._graph = self._build_graph()
 
@@ -192,12 +205,16 @@ class Orchestrator:
         """
         self._evict_stale_states()
 
+        # Передать историю диалога для контекста
+        history = list(self._histories.get(user_id, []))
+
         initial_state: OrchestratorState = {
             "user_id": user_id,
             "query": query,
             "intent": "",
             "response": "",
             "chunks": [],
+            "history": history,
         }
 
         result = await self._graph.ainvoke(initial_state)
@@ -211,6 +228,10 @@ class Orchestrator:
             chunks=result["chunks"],
             updated_at=time.monotonic(),
         )
+
+        # Сохранить в историю (только для consult — чтобы не засорять чатом с FSM)
+        if result["intent"] == "consult" and result["response"]:
+            self._append_history(user_id, query, result["response"])
 
         return result["response"], result["chunks"]
 
@@ -279,7 +300,10 @@ class Orchestrator:
 
     def _node_beebot(self, state: OrchestratorState) -> OrchestratorState:
         """Маршрут: consult → BEEBOT-консультант."""
-        response, chunks = self._beebot.answer(state["query"])
+        response, chunks = self._beebot.answer(
+            state["query"],
+            history=state.get("history"),
+        )
         return {**state, "response": response, "chunks": chunks}
 
     async def _node_logist(self, state: OrchestratorState) -> OrchestratorState:
@@ -326,8 +350,21 @@ class Orchestrator:
     def _is_fresh(self, state: DialogState) -> bool:
         return (time.monotonic() - state["updated_at"]) < _DIALOG_TTL_SECONDS
 
+    def _append_history(self, user_id: int, query: str, response: str) -> None:
+        """Добавить пару вопрос-ответ в историю, ограничить до _MAX_HISTORY пар."""
+        if user_id not in self._histories:
+            self._histories[user_id] = []
+        hist = self._histories[user_id]
+        hist.append({"role": "user", "content": query})
+        hist.append({"role": "assistant", "content": response})
+        # Оставить только последние _MAX_HISTORY пар (×2 сообщения)
+        max_messages = _MAX_HISTORY * 2
+        if len(hist) > max_messages:
+            self._histories[user_id] = hist[-max_messages:]
+
     def _evict_stale_states(self):
         """Удалить устаревшие состояния диалога (TTL 30 мин)."""
         stale = [uid for uid, s in self._dialog_states.items() if not self._is_fresh(s)]
         for uid in stale:
             del self._dialog_states[uid]
+            self._histories.pop(uid, None)

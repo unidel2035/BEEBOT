@@ -293,7 +293,9 @@ class TestOrders:
         with _mock_crm(orders=orders):
             resp = client.get("/api/orders", headers=auth_headers)
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        data = resp.json()
+        assert data["total"] == 2
+        assert len(data["items"]) == 2
 
     def test_list_orders_with_status_filter(self, auth_headers):
         orders = [_make_order(status="Доставлен")]
@@ -374,7 +376,9 @@ class TestProducts:
         with _mock_crm(products=products):
             resp = client.get("/api/products", headers=auth_headers)
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        data = resp.json()
+        assert data["total"] == 2
+        assert len(data["items"]) == 2
 
     def test_create_product(self, auth_headers):
         with _mock_crm(new_product_id=99):

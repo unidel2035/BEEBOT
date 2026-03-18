@@ -28,6 +28,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import csv
+import io
+import json as json_lib
 import logging
 import os
 import secrets
@@ -37,6 +41,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from pydantic import BaseModel
@@ -229,6 +234,49 @@ class UserUpdate(BaseModel):
     role: Optional[str] = None
     display_name: Optional[str] = None
     active: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# Пагинация и поиск
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PAGE_SIZE = 50
+_MAX_PAGE_SIZE = 200
+
+
+def _paginate(
+    items: list[dict],
+    page: int = 1,
+    per_page: int = _DEFAULT_PAGE_SIZE,
+    search: Optional[str] = None,
+    search_fields: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Пагинация + поиск по списку элементов.
+
+    Returns:
+        {"items": [...], "total": N, "page": P, "per_page": PP, "pages": T}
+    """
+    # Текстовый поиск
+    if search and search_fields:
+        q = search.lower()
+        items = [
+            item for item in items
+            if any(q in str(item.get(f, "")).lower() for f in search_fields)
+        ]
+
+    total = len(items)
+    per_page = min(max(per_page, 1), _MAX_PAGE_SIZE)
+    page = max(page, 1)
+    pages = max((total + per_page - 1) // per_page, 1)
+    start = (page - 1) * per_page
+
+    return {
+        "items": items[start:start + per_page],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -473,9 +521,12 @@ async def list_orders(
     status: Optional[str] = None,
     source: Optional[str] = None,
     client_id: Optional[int] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    per_page: int = _DEFAULT_PAGE_SIZE,
     user: CurrentUser = Depends(_require_role("admin", "warehouse")),
-) -> list[dict[str, Any]]:
-    """Список заказов."""
+) -> dict[str, Any]:
+    """Список заказов с пагинацией и поиском."""
     try:
         crm = await _get_crm()
         try:
@@ -483,7 +534,10 @@ async def list_orders(
             result = [_order_to_dict(o) for o in orders]
             if source:
                 result = [o for o in result if o.get("source") == source]
-            return result
+            return _paginate(
+                result, page, per_page, search,
+                search_fields=["number", "client_name", "delivery_address", "comment"],
+            )
         finally:
             await crm.close()
     except (IntegramError, IntegramAPIError) as exc:
@@ -557,6 +611,12 @@ async def update_order_status(
             except Exception as e:
                 logger.warning("Не удалось уведомить клиента: %s", e)
 
+            # SSE: уведомить веб-панель
+            await push_event("order_status", {
+                "order_id": order_id,
+                "status": body.status,
+            })
+
             return {"ok": True, "order_id": order_id, "status": body.status, "notified": notified}
         finally:
             await crm.close()
@@ -591,6 +651,12 @@ async def update_order_tracking(
                         )
             except Exception as e:
                 logger.warning("Не удалось уведомить клиента: %s", e)
+
+            # SSE: уведомить веб-панель
+            await push_event("order_tracking", {
+                "order_id": order_id,
+                "tracking_number": body.tracking_number,
+            })
 
             return {"ok": True, "order_id": order_id, "tracking_number": body.tracking_number, "notified": notified}
         finally:
@@ -773,14 +839,21 @@ async def delete_order_item(
 
 @app.get("/api/clients", tags=["clients"])
 async def list_clients(
+    search: Optional[str] = None,
+    page: int = 1,
+    per_page: int = _DEFAULT_PAGE_SIZE,
     _: CurrentUser = Depends(_require_role("admin")),
-) -> list[dict[str, Any]]:
-    """Список всех клиентов."""
+) -> dict[str, Any]:
+    """Список клиентов с пагинацией и поиском."""
     try:
         crm = await _get_crm()
         try:
             clients = await crm.get_clients()
-            return [_client_to_dict(c) for c in clients]
+            result = [_client_to_dict(c) for c in clients]
+            return _paginate(
+                result, page, per_page, search,
+                search_fields=["name", "phone", "address", "city", "telegram_username"],
+            )
         finally:
             await crm.close()
     except (IntegramError, IntegramAPIError) as exc:
@@ -820,14 +893,21 @@ async def get_client(
 @app.get("/api/products", tags=["products"])
 async def list_products(
     in_stock_only: bool = False,
+    search: Optional[str] = None,
+    page: int = 1,
+    per_page: int = _DEFAULT_PAGE_SIZE,
     _: CurrentUser = Depends(_require_role("admin", "warehouse")),
-) -> list[dict[str, Any]]:
-    """Список всех товаров."""
+) -> dict[str, Any]:
+    """Список товаров с пагинацией и поиском."""
     try:
         crm = await _get_crm()
         try:
             products = await crm.get_products(in_stock_only=in_stock_only)
-            return [_product_to_dict(p) for p in products]
+            result = [_product_to_dict(p) for p in products]
+            return _paginate(
+                result, page, per_page, search,
+                search_fields=["name", "category", "description", "sku_uds"],
+            )
         finally:
             await crm.close()
     except (IntegramError, IntegramAPIError) as exc:
@@ -914,6 +994,104 @@ async def update_product_stock(
         try:
             await crm.update_product_stock(product_id, body.stock)
             return {"ok": True, "product_id": product_id, "stock": body.stock}
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
+
+
+# ---------------------------------------------------------------------------
+# Экспорт CSV
+# ---------------------------------------------------------------------------
+
+def _to_csv(rows: list[dict], fields: list[str], headers: list[str]) -> str:
+    """Сгенерировать CSV-строку из списка словарей."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(headers)
+    for row in rows:
+        writer.writerow([row.get(f, "") for f in fields])
+    return buf.getvalue()
+
+
+@app.get("/api/export/orders", tags=["export"])
+async def export_orders_csv(
+    status: Optional[str] = None,
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> StreamingResponse:
+    """Экспорт заказов в CSV."""
+    try:
+        crm = await _get_crm()
+        try:
+            orders = await crm.get_orders(status=status)
+            rows = [_order_to_dict(o) for o in orders]
+            content = _to_csv(
+                rows,
+                fields=["number", "date", "client_name", "status", "delivery_method",
+                         "delivery_address", "items_total", "delivery_cost", "total", "source"],
+                headers=["Номер", "Дата", "Клиент", "Статус", "Доставка",
+                          "Адрес", "Сумма товаров", "Доставка ₽", "Итого", "Источник"],
+            )
+            return StreamingResponse(
+                io.BytesIO(content.encode("utf-8-sig")),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": "attachment; filename=orders.csv"},
+            )
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
+
+
+@app.get("/api/export/clients", tags=["export"])
+async def export_clients_csv(
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> StreamingResponse:
+    """Экспорт клиентов в CSV."""
+    try:
+        crm = await _get_crm()
+        try:
+            clients = await crm.get_clients()
+            rows = [_client_to_dict(c) for c in clients]
+            content = _to_csv(
+                rows,
+                fields=["id", "name", "phone", "city", "address", "source", "telegram_username"],
+                headers=["ID", "ФИО", "Телефон", "Город", "Адрес", "Источник", "Telegram"],
+            )
+            return StreamingResponse(
+                io.BytesIO(content.encode("utf-8-sig")),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": "attachment; filename=clients.csv"},
+            )
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
+
+
+@app.get("/api/export/products", tags=["export"])
+async def export_products_csv(
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> StreamingResponse:
+    """Экспорт товаров в CSV."""
+    try:
+        crm = await _get_crm()
+        try:
+            products = await crm.get_products(in_stock_only=False)
+            rows = [_product_to_dict(p) for p in products]
+            content = _to_csv(
+                rows,
+                fields=["id", "name", "category", "price", "weight", "stock", "in_stock"],
+                headers=["ID", "Название", "Категория", "Цена", "Вес", "Остаток", "В наличии"],
+            )
+            return StreamingResponse(
+                io.BytesIO(content.encode("utf-8-sig")),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": "attachment; filename=products.csv"},
+            )
         finally:
             await crm.close()
     except (IntegramError, IntegramAPIError) as exc:
@@ -1015,3 +1193,50 @@ async def delete_user_endpoint(
     except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
+
+
+# ---------------------------------------------------------------------------
+# SSE — серверные уведомления (Server-Sent Events)
+# ---------------------------------------------------------------------------
+
+# Очередь событий для подписчиков
+_event_subscribers: list[asyncio.Queue] = []
+
+
+async def push_event(event_type: str, data: dict) -> None:
+    """Отправить событие всем подписанным SSE-клиентам."""
+    payload = {"type": event_type, **data}
+    dead: list[asyncio.Queue] = []
+    for q in _event_subscribers:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        _event_subscribers.remove(q)
+
+
+@app.get("/api/events", tags=["events"])
+async def sse_events(
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
+):
+    """SSE-поток событий (новые заказы, смена статусов, трек-номера)."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _event_subscribers.append(queue)
+
+    async def event_stream():
+        try:
+            while True:
+                event = await queue.get()
+                yield f"data: {json_lib.dumps(event, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if queue in _event_subscribers:
+                _event_subscribers.remove(queue)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

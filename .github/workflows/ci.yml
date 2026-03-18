@@ -36,3 +36,20 @@ jobs:
           --ignore=tests/test_integration.py
           -v --tb=short
           -x
+
+  deploy:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/ai-agent/BEEBOT
+            git fetch fork main
+            git merge fork/main --no-edit
+            docker compose up -d --build

@@ -57,8 +57,7 @@ analyst = AnalystAgent(
     groq_model=orchestrator._model,
 )
 
-# Инициализировать админ-модуль без CRM (CRM подключается в main())
-setup_admin(bot)
+# setup_admin() вызывается в main() — один раз, после подключения CRM
 
 # Хранилище задач таймаута (user_id → asyncio.Task)
 _timeout_lock = asyncio.Lock()
@@ -893,12 +892,14 @@ async def main():
             # Передать CRM-клиент всем агентам
             logist._crm = integram_client
             analyst._crm = integram_client
-            setup_admin(bot, crm=integram_client)
             logger.info("Integram CRM подключена — агенты получили доступ к данным.")
         except Exception as e:
             logger.warning("Integram CRM недоступна: %s — агенты работают без CRM.", e)
     else:
         logger.info("Integram CRM не настроена — агенты работают без CRM.")
+
+    # Инициализировать админ-модуль (один раз, с CRM если доступна)
+    setup_admin(bot, crm=integram_client)
 
     # --- UDS Poller: фоновая синхронизация заказов из UDS ---
     uds_poller: Optional[UDSPoller] = None

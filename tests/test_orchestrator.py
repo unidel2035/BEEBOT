@@ -37,11 +37,12 @@ class TestClassifyIntent:
         result = _classify_intent(client, "llama-3.3-70b-versatile", "Хочу купить пергу")
         assert result == "order"
 
-    def test_returns_delivery_for_shipping_question(self):
+    def test_returns_track_for_shipping_question(self):
+        """'track' is a valid intent; 'delivery' is not — it falls back to consult."""
         client = MagicMock()
-        client.chat.completions.create.return_value = self._make_groq_response("delivery")
+        client.chat.completions.create.return_value = self._make_groq_response("track")
         result = _classify_intent(client, "llama-3.3-70b-versatile", "Где мой трек-номер?")
-        assert result == "delivery"
+        assert result == "track"
 
     def test_returns_stats_for_analytics_question(self):
         client = MagicMock()
@@ -104,27 +105,25 @@ class TestOrchestratorRouting:
 
     @pytest.mark.asyncio
     async def test_order_intent_routes_to_logist(self):
-        """order intent should invoke LogistAgent and return a placeholder."""
+        """order intent should route to logist node (returns empty — FSM handled in bot.py)."""
         orch = self._make_orchestrator()
-        orch._logist.collect_shipping_info = AsyncMock(side_effect=NotImplementedError)
 
         with patch("src.orchestrator._classify_intent", return_value="order"):
             response, chunks = await orch.route(1002, "Хочу купить пергу")
 
         assert chunks == []
-        assert len(response) > 0
+        assert response == ""
 
     @pytest.mark.asyncio
-    async def test_delivery_intent_routes_to_logist(self):
-        """delivery intent should invoke LogistAgent."""
+    async def test_track_intent_routes_to_passthrough(self):
+        """track intent should route to passthrough node (handled in bot.py)."""
         orch = self._make_orchestrator()
-        orch._logist.collect_shipping_info = AsyncMock(side_effect=NotImplementedError)
 
-        with patch("src.orchestrator._classify_intent", return_value="delivery"):
+        with patch("src.orchestrator._classify_intent", return_value="track"):
             response, chunks = await orch.route(1003, "Где мой заказ?")
 
         assert chunks == []
-        assert len(response) > 0
+        assert response == ""
 
     @pytest.mark.asyncio
     async def test_stats_intent_routes_to_analyst(self):

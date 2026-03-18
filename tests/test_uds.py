@@ -227,22 +227,24 @@ class TestUDSClient:
 class TestTransactionDeduplicator:
 
     def test_new_transaction_passes(self):
-        dedup = TransactionDeduplicator(since=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        dedup = TransactionDeduplicator()
+        since = datetime(2026, 1, 1, tzinfo=timezone.utc)
         tx = {"id": "tx-1", "created_at": "2026-03-13T10:00:00Z"}
-        assert dedup.is_new(tx) is True
+        assert dedup.is_new(tx, since=since) is True
 
     def test_seen_transaction_rejected(self):
-        dedup = TransactionDeduplicator(since=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        dedup = TransactionDeduplicator()
+        since = datetime(2026, 1, 1, tzinfo=timezone.utc)
         tx = {"id": "tx-1", "created_at": "2026-03-13T10:00:00Z"}
         dedup.mark_seen("tx-1")
-        assert dedup.is_new(tx) is False
+        assert dedup.is_new(tx, since=since) is False
 
     def test_old_transaction_rejected(self):
         """Транзакция до since должна быть отфильтрована."""
         since = datetime(2026, 3, 13, 12, 0, 0, tzinfo=timezone.utc)
-        dedup = TransactionDeduplicator(since=since)
+        dedup = TransactionDeduplicator()
         tx = {"id": "tx-old", "created_at": "2026-03-13T10:00:00Z"}
-        assert dedup.is_new(tx) is False
+        assert dedup.is_new(tx, since=since) is False
 
     def test_transaction_without_date_passes(self):
         """Транзакция без даты — обрабатываем (не отфильтровываем)."""
@@ -251,9 +253,10 @@ class TestTransactionDeduplicator:
         assert dedup.is_new(tx) is True
 
     def test_transaction_with_invalid_date_passes(self):
-        dedup = TransactionDeduplicator(since=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        dedup = TransactionDeduplicator()
+        since = datetime(2026, 1, 1, tzinfo=timezone.utc)
         tx = {"id": "tx-bad", "created_at": "not-a-date"}
-        assert dedup.is_new(tx) is True
+        assert dedup.is_new(tx, since=since) is True
 
 
 # ---------------------------------------------------------------------------

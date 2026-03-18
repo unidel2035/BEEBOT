@@ -216,19 +216,31 @@ class TestBotEndToEnd:
         message.reply = AsyncMock()
         return message
 
+    def _make_state(self):
+        """Create a mock FSMContext for handle_question."""
+        state = AsyncMock()
+        state.get_state = AsyncMock(return_value=None)
+        state.set_state = AsyncMock()
+        state.get_data = AsyncMock(return_value={})
+        state.update_data = AsyncMock()
+        state.clear = AsyncMock()
+        return state
+
     @pytest.mark.asyncio
     async def test_private_message_gets_reply(self):
         """Private message should always get a reply."""
         msg = self._make_message("Чем полезна перга?", chat_type="private")
+        state = self._make_state()
 
-        mock_agent = MagicMock()
-        mock_agent.answer.return_value = ("Перга богата белками и витаминами!", [])
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.route = AsyncMock(return_value=("Перга богата белками и витаминами!", []))
+        mock_orchestrator.get_intent = MagicMock(return_value="consult")
         with (
-            patch("src.bot.agent", mock_agent),
+            patch("src.bot.orchestrator", mock_orchestrator),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
-            await handle_question(msg)
+            await handle_question(msg, state)
 
         msg.reply.assert_called_once()
         reply_text = msg.reply.call_args[0][0]
@@ -238,7 +250,8 @@ class TestBotEndToEnd:
     async def test_group_message_without_mention_ignored(self):
         """Group message without @mention should be silently ignored."""
         msg = self._make_message("Просто разговор", chat_type="group")
-        await handle_question(msg)
+        state = self._make_state()
+        await handle_question(msg, state)
         msg.reply.assert_not_called()
 
     @pytest.mark.asyncio
@@ -248,15 +261,17 @@ class TestBotEndToEnd:
             f"@{BOT_USERNAME} Как принимать прополис?",
             chat_type="group",
         )
+        state = self._make_state()
 
-        mock_agent = MagicMock()
-        mock_agent.answer.return_value = ("Принимайте по 20 капель.", [])
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.route = AsyncMock(return_value=("Принимайте по 20 капель.", []))
+        mock_orchestrator.get_intent = MagicMock(return_value="consult")
         with (
-            patch("src.bot.agent", mock_agent),
+            patch("src.bot.orchestrator", mock_orchestrator),
             patch("src.bot.bot") as mock_bot,
         ):
             mock_bot.send_chat_action = AsyncMock()
-            await handle_question(msg)
+            await handle_question(msg, state)
 
         msg.reply.assert_called_once()
 
@@ -264,9 +279,10 @@ class TestBotEndToEnd:
     async def test_short_query_returns_hint(self):
         """A very short query (< 3 chars) should prompt user to write more."""
         msg = self._make_message("??", chat_type="private")
+        state = self._make_state()
 
         with patch("src.bot._should_respond", return_value=True):
-            await handle_question(msg)
+            await handle_question(msg, state)
 
         msg.reply.assert_called_once()
         reply = msg.reply.call_args[0][0]

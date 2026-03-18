@@ -323,10 +323,28 @@ class TransactionDeduplicator:
             logger.error("UDS Dedup: не удалось загрузить заказы из CRM: %s", e)
         return len(self._seen)
 
-    def is_new(self, transaction: dict) -> bool:
-        """Вернуть True, если транзакция новая и ещё не обрабатывалась."""
+    def is_new(self, transaction: dict, since: datetime | None = None) -> bool:
+        """Вернуть True, если транзакция новая и ещё не обрабатывалась.
+
+        Args:
+            transaction: нормализованная транзакция.
+            since: если указано, транзакции старше этой даты считаются «не новыми».
+        """
         tid = transaction.get("id", "")
-        return tid not in self._seen
+        if tid in self._seen:
+            return False
+
+        if since:
+            created_raw = transaction.get("created_at", "")
+            if created_raw:
+                try:
+                    created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                    if created < since:
+                        return False
+                except ValueError:
+                    pass
+
+        return True
 
     def mark_seen(self, transaction_id: str) -> None:
         """Пометить транзакцию как обработанную."""
@@ -594,7 +612,7 @@ class UDSPoller:
         new_count = 0
 
         for tx in transactions:
-            if not self._dedup.is_new(tx):
+            if not self._dedup.is_new(tx, since=self._SYNC_SINCE):
                 continue
 
             try:

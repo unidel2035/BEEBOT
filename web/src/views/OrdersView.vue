@@ -18,6 +18,15 @@
         class="w-44"
         @change="loadOrders"
       />
+      <Select
+        v-model="filterSource"
+        :options="[{ label: 'Все источники', value: '' }, ...sourceOptions]"
+        option-label="label"
+        option-value="value"
+        placeholder="Источник"
+        class="w-44"
+        @change="loadOrders"
+      />
       <span class="flex-1" />
       <Button
         label="Сбросить"
@@ -48,6 +57,18 @@
         </Column>
         <Column field="date" header="Дата" sortable>
           <template #body="{ data }">{{ formatDate(data.date) }}</template>
+        </Column>
+        <Column field="source" header="Источник" sortable>
+          <template #body="{ data }">
+            <span v-if="data.source" class="text-xs px-2 py-0.5 rounded-full"
+              :class="{
+                'bg-blue-50 text-blue-700': data.source === 'Telegram',
+                'bg-purple-50 text-purple-700': data.source === 'UDS',
+                'bg-green-50 text-green-700': data.source === 'WhatsApp',
+                'bg-gray-50 text-gray-600': !['Telegram','UDS','WhatsApp'].includes(data.source),
+              }">{{ data.source }}</span>
+            <span v-else class="text-gray-300">—</span>
+          </template>
         </Column>
         <Column field="status" header="Статус" sortable>
           <template #body="{ data }">
@@ -85,18 +106,23 @@ import { formatDate, formatMoney } from '../utils.js'
 const loading = ref(true)
 const orders = ref([])
 const filterStatus = ref('')
+const filterSource = ref('')
 const statusOptions = ref([])
+const sourceOptions = ref([])
 
 onMounted(async () => {
   const ref_ = await getReference()
   statusOptions.value = ref_.order_statuses.map((s) => ({ label: s, value: s }))
+  sourceOptions.value = (ref_.order_sources || []).map((s) => ({ label: s, value: s }))
   await loadOrders()
 })
 
 async function loadOrders() {
   loading.value = true
   try {
-    const params = filterStatus.value ? { status: filterStatus.value } : {}
+    const params = {}
+    if (filterStatus.value) params.status = filterStatus.value
+    if (filterSource.value) params.source = filterSource.value
     orders.value = await getOrders(params)
   } finally {
     loading.value = false
@@ -105,6 +131,7 @@ async function loadOrders() {
 
 function resetFilters() {
   filterStatus.value = ''
+  filterSource.value = ''
   loadOrders()
 }
 </script>

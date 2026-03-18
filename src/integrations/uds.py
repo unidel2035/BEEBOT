@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _UDS_BASE_URL = getattr(config, "UDS_BASE_URL", None) or "https://api.uds.app/partner/v2"
-_POLL_INTERVAL_SECONDS = 60  # опрос каждую минуту
+_POLL_INTERVAL_SECONDS = 300  # опрос каждые 5 минут
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 1.0
 
@@ -200,16 +200,11 @@ class UDSClient:
     # Public API
     # ------------------------------------------------------------------
 
-    async def get_transactions(
-        self,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[dict]:
-        """Получить список транзакций (продаж) из UDS.
+    async def get_transactions(self, limit: int = 50) -> list[dict]:
+        """Получить последние транзакции (первая страница, newest-first).
 
         Args:
-            limit: максимальное число транзакций в ответе.
-            offset: смещение для пагинации.
+            limit: максимальное число транзакций в ответе (макс 50).
 
         Returns:
             Список нормализованных транзакций.
@@ -217,10 +212,61 @@ class UDSClient:
         data = await self._request(
             "GET",
             "/operations",
-            params={"max": limit, "skip": offset},
+            params={"max": limit},
         )
         rows = data if isinstance(data, list) else data.get("rows", data.get("items", []))
         return [_parse_transaction(row) for row in rows]
+
+    async def get_transactions_since(
+        self,
+        since: datetime,
+        page_size: int = 50,
+    ) -> list[dict]:
+        """Получить все транзакции начиная с даты ``since`` (cursor-пагинация).
+
+        UDS API не поддерживает ``skip`` — используем ``cursor`` из ответа
+        для пагинации от новых к старым. Останавливаемся, когда встречаем
+        транзакцию старше ``since``.
+
+        Args:
+            since: дата, начиная с которой нужны транзакции (UTC).
+            page_size: размер страницы (макс 50).
+
+        Returns:
+            Список нормализованных транзакций (newest-first).
+        """
+        txs: list[dict] = []
+        cursor: str | None = None
+        since_str = since.strftime("%Y-%m-%d")
+
+        while True:
+            params: dict[str, Any] = {"max": page_size}
+            if cursor:
+                params["cursor"] = cursor
+
+            data = await self._request("GET", "/operations", params=params)
+            rows = data if isinstance(data, list) else data.get("rows", data.get("items", []))
+            new_cursor = data.get("cursor") if isinstance(data, dict) else None
+
+            if not rows:
+                break
+
+            hit_old = False
+            for row in rows:
+                date_str = row.get("dateCreated", "")[:10]
+                if date_str < since_str:
+                    hit_old = True
+                    break
+                txs.append(_parse_transaction(row))
+
+            if hit_old or not new_cursor or new_cursor == cursor:
+                break
+            cursor = new_cursor
+            # Пауза между страницами — UDS API имеет недокументированный
+            # rate limit, без задержки catch-up вызывает 429.
+            await asyncio.sleep(3)
+
+        return txs
 
     async def get_customer(self, customer_uds_id: str) -> dict:
         """Получить данные клиента по его UID в UDS.
@@ -251,32 +297,55 @@ class UDSClient:
 
 
 class TransactionDeduplicator:
-    """Хранит ID уже обработанных транзакций UDS (в памяти).
+    """Хранит ID уже обработанных транзакций UDS.
 
-    При рестарте процесса история сбрасывается, поэтому при первом
-    запуске обрабатываются только транзакции, созданные после ``since``.
+    При старте загружает существующие ``UDS-*`` заказы из CRM, чтобы
+    не дублировать их после рестарта.
     """
 
-    def __init__(self, since: Optional[datetime] = None) -> None:
+    def __init__(self) -> None:
         self._seen: set[str] = set()
-        # Если since не указан — принять текущий момент, чтобы не дублировать старые.
-        self._since: datetime = since or datetime.now(tz=timezone.utc)
 
-    def is_new(self, transaction: dict) -> bool:
-        """Вернуть True, если транзакция новая и ещё не обрабатывалась."""
+    async def load_existing_from_crm(self, integram_client: Any) -> int:
+        """Загрузить ID уже созданных UDS-заказов из CRM.
+
+        Returns:
+            Количество загруженных ID.
+        """
+        try:
+            orders = await integram_client.get_orders()
+            for order in orders:
+                if order.number and order.number.startswith("UDS-"):
+                    tid = order.number.replace("UDS-", "")
+                    self._seen.add(tid)
+            logger.info(
+                "UDS Dedup: загружено %d существующих UDS-заказов из CRM.",
+                len(self._seen),
+            )
+        except Exception as e:
+            logger.error("UDS Dedup: не удалось загрузить заказы из CRM: %s", e)
+        return len(self._seen)
+
+    def is_new(self, transaction: dict, since: datetime | None = None) -> bool:
+        """Вернуть True, если транзакция новая и ещё не обрабатывалась.
+
+        Args:
+            transaction: нормализованная транзакция.
+            since: если указано, транзакции старше этой даты считаются «не новыми».
+        """
         tid = transaction.get("id", "")
         if tid in self._seen:
             return False
 
-        # Фильтр по дате: пропустить транзакции, созданные до запуска.
-        created_raw = transaction.get("created_at", "")
-        if created_raw:
-            try:
-                created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                if created < self._since:
-                    return False
-            except ValueError:
-                pass  # Нераспознанный формат — всё равно обрабатываем
+        if since:
+            created_raw = transaction.get("created_at", "")
+            if created_raw:
+                try:
+                    created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                    if created < since:
+                        return False
+                except ValueError:
+                    pass
 
         return True
 
@@ -309,6 +378,15 @@ async def sync_uds_transaction(
     name = transaction["customer_name"] or f"UDS-клиент {transaction['customer_uds_id']}"
     total = transaction["total"]
 
+    # Дата транзакции из UDS (или текущая, если не удалось распарсить)
+    order_date = datetime.now(tz=timezone.utc)
+    created_raw = transaction.get("created_at", "")
+    if created_raw:
+        try:
+            order_date = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
     logger.info("UDS: обрабатываем транзакцию %s (клиент: %s, сумма: %.2f)", tid, name, total)
 
     # 1. Найти или создать клиента по телефону
@@ -327,6 +405,7 @@ async def sync_uds_transaction(
         items_total=items_total,
         total=total,
         status="Новый",
+        date=order_date,
     )
     logger.info("UDS: создан заказ #%s (Integram ID=%d)", order.number, order.id)
 
@@ -432,16 +511,21 @@ async def _notify_beekeeper(
 class UDSPoller:
     """Polling-сервис: периодически опрашивает UDS и синхронизирует заказы.
 
-    Запускается как фоновая asyncio-задача::
+    При запуске:
+      1. Загружает из CRM уже существующие UDS-заказы (для дедупликации).
+      2. Делает начальный catch-up: cursor-пагинация всех транзакций
+         начиная с ``sync_since`` и синхронизирует пропущенные.
+      3. Переходит в режим обычного polling (первая страница раз в минуту).
+
+    Запуск::
 
         poller = UDSPoller(uds_client, integram_client, bot)
         asyncio.create_task(poller.run())
-
-    Или через async context manager::
-
-        async with UDSPoller(uds_client, integram_client, bot) as poller:
-            await poller.run()
     """
+
+    # Дата, начиная с которой синхронизируем UDS → CRM (10-значные ID).
+    # Все транзакции до этой даты — из файла пчеловода (7-значные ID).
+    _SYNC_SINCE = datetime(2026, 3, 17, tzinfo=timezone.utc)
 
     def __init__(
         self,
@@ -470,27 +554,68 @@ class UDSPoller:
         self._running = False
 
     async def run(self) -> None:
-        """Запустить бесконечный polling-цикл (до вызова stop())."""
+        """Запустить polling: catch-up → бесконечный цикл."""
         self._running = True
-        logger.info("UDS Poller: запущен (интервал опроса %ds).", self._poll_interval)
 
+        # 1. Загрузить существующие UDS-заказы из CRM
+        await self._dedup.load_existing_from_crm(self._integram)
+
+        # 2. Начальный catch-up: подтянуть всё с 17.03.2026
+        try:
+            await self._initial_sync()
+        except Exception as e:
+            logger.error("UDS Poller: ошибка при начальной синхронизации: %s", e)
+
+        # 3. Обычный polling
+        logger.info("UDS Poller: запущен (интервал опроса %ds).", self._poll_interval)
         while self._running:
             try:
                 await self._poll_once()
             except Exception as e:
                 logger.error("UDS Poller: ошибка при опросе: %s", e)
-
             await asyncio.sleep(self._poll_interval)
 
         logger.info("UDS Poller: остановлен.")
 
+    async def _initial_sync(self) -> None:
+        """Catch-up: синхронизировать все транзакции с ``_SYNC_SINCE``."""
+        logger.info(
+            "UDS Poller: начальная синхронизация (с %s)...",
+            self._SYNC_SINCE.strftime("%Y-%m-%d"),
+        )
+        txs = await self._uds.get_transactions_since(self._SYNC_SINCE)
+        new_count = 0
+
+        for tx in txs:
+            if not self._dedup.is_new(tx):
+                continue
+            try:
+                await sync_uds_transaction(
+                    tx,
+                    self._integram,
+                    notify_chat_id=self._notify_chat_id,
+                    bot=self._bot,
+                )
+                self._dedup.mark_seen(tx["id"])
+                new_count += 1
+            except Exception as e:
+                logger.error(
+                    "UDS Poller: catch-up ошибка транзакции %s: %s",
+                    tx.get("id"), e,
+                )
+
+        logger.info(
+            "UDS Poller: catch-up завершён — загружено %d транзакций, синхронизировано %d новых.",
+            len(txs), new_count,
+        )
+
     async def _poll_once(self) -> None:
-        """Один цикл опроса: получить транзакции и обработать новые."""
+        """Один цикл опроса: получить последние транзакции и обработать новые."""
         transactions = await self._uds.get_transactions(limit=50)
         new_count = 0
 
         for tx in transactions:
-            if not self._dedup.is_new(tx):
+            if not self._dedup.is_new(tx, since=self._SYNC_SINCE):
                 continue
 
             try:

@@ -75,8 +75,12 @@ class BeebotAgent:
         self.kb = KnowledgeBase()
         self.llm = LLMClient()
 
-    def answer(self, query: str) -> tuple[str, list[dict]]:
+    def answer(
+        self,
+        query: str,
+        history: list[dict] | None = None,
+    ) -> tuple[str, list[dict]]:
         """Ответить на вопрос. Возвращает (ответ, список чанков)."""
         chunks = self.kb.search(query)
-        response = self.llm.generate(query, chunks)
+        response = self.llm.generate(query, chunks, history=history)
         return response, chunks

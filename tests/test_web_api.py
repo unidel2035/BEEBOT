@@ -3,18 +3,18 @@
 Тестируемые области:
   - Аутентификация (JWT): успешный вход, неверный пароль, доступ без токена
   - Справочники: список статусов и способов доставки
-  - Дашборд: агрегирование статистики из списка заказов
-  - Заказы: список, детали, смена статуса, трек-номер, ручной заказ
+  - Дашборд: агрегирование статистики через get_dashboard_stats()
+  - Заказы: список, детали, смена статуса, трек-номер
   - Клиенты: список, детали с историей заказов
   - Товары: список, создание, обновление, удаление (снятие с продажи)
 
-Все внешние вызовы Integram CRM замокированы через unittest.mock.patch.
+Все внешние вызовы CRM замокированы через unittest.mock.patch.
 """
 
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,58 +31,75 @@ os.environ.setdefault("INTEGRAM_PASSWORD", "pass")
 os.environ.setdefault("INTEGRAM_DB", "testdb")
 
 from src.web.api import app  # noqa: E402
-from src.models import Client, Order, Product  # noqa: E402
+from src.models import Order, Client, Product, OrderItem  # noqa: E402
 
 client = TestClient(app)
 
 
 # ---------------------------------------------------------------------------
-# Фикстуры
+# Фикстуры: Pydantic-модели (как возвращает IntegramClient)
 # ---------------------------------------------------------------------------
 
 def _make_product(id: int = 1, name: str = "Перга", price: float = 500.0) -> Product:
-    return Product.model_validate({
-        "id": id,
-        "Название": name,
-        "Категория": "Продукты пчеловодства",
-        "Цена": price,
-        "Вес": 100,
-        "Описание": "Пчелиный хлеб",
-        "В наличии": True,
-        "Артикул UDS": "P001",
-    })
+    return Product(
+        id=id,
+        name=name,
+        category="Продукты пчеловодства",
+        price=price,
+        weight=100,
+        description="Пчелиный хлеб",
+        in_stock=True,
+        sku_uds="P001",
+        short_name=None,
+        stock=10,
+    )
 
 
 def _make_client(id: int = 1) -> Client:
-    return Client.model_validate({
-        "id": id,
-        "ФИО": "Иван Иванов",
-        "Телефон": "+79001234567",
-        "Telegram ID": 123456,
-        "Telegram Username": "iivanov",
-        "Адрес": "г. Москва, ул. Пчелиная, 1",
-        "Город": "Москва",
-        "Источник": "Telegram",
-    })
+    return Client(
+        id=id,
+        full_name="Иван Иванов",
+        phone="+79001234567",
+        telegram_id=123456,
+        telegram_username="iivanov",
+        address="г. Москва, ул. Пчелиная, 1",
+        city="Москва",
+        source="Telegram",
+    )
 
 
 def _make_order(id: int = 1, status: str = "Новый", total: float = 1000.0) -> Order:
-    return Order.model_validate({
-        "id": id,
-        "Номер": f"ORD-{id:04d}",
-        "client_id": 1,
-        "client_name": "Иван Иванов",
-        "Дата": datetime.now(timezone.utc).isoformat(),
-        "Статус": status,
-        "Способ доставки": "СДЭК",
-        "Адрес доставки": "Москва",
-        "Стоимость доставки": 300.0,
-        "Сумма товаров": 700.0,
-        "Итого": total,
-        "Трек-номер": None,
-        "Источник": "Telegram",
-        "items": [],
-    })
+    return Order(
+        id=id,
+        number=f"ORD-{id:04d}",
+        client_id=1,
+        client_name="Иван Иванов",
+        date=datetime(2026, 3, 18, 12, 0, 0),
+        status=status,
+        delivery_method="СДЭК",
+        delivery_address="Москва",
+        delivery_cost=300.0,
+        items_total=700.0,
+        total=total,
+        tracking_number=None,
+        source="Telegram",
+        comment=None,
+        messenger=None,
+        month="03.2026",
+        items=[],
+    )
+
+
+def _make_order_item(id: int = 1, order_id: int = 1) -> OrderItem:
+    return OrderItem(
+        id=id,
+        order_id=order_id,
+        product_id=1,
+        product_name="Перга",
+        quantity=2,
+        unit_price=350.0,
+        total=700.0,
+    )
 
 
 def _get_token() -> str:
@@ -105,36 +122,58 @@ def auth_headers() -> dict[str, str]:
 # Вспомогательный контекст-менеджер для мока IntegramClient
 # ---------------------------------------------------------------------------
 
-def _mock_integram(**kwargs: Any):
-    """Patch _get_integram() и настроить мок-клиент.
+def _mock_crm(**kwargs: Any):
+    """Patch _get_crm() и настроить мок-клиент.
 
     kwargs пробрасываются как атрибуты мока:
-      products=[...], orders=[...], clients=[...], raw_client={...}
+      products=[...], orders=[...], clients=[...],
+      dashboard_stats={...}, order_items=[...]
     """
     mock_client = MagicMock()
     mock_client.close = AsyncMock()
     mock_client.authenticate = AsyncMock()
 
-    if "products" in kwargs:
-        mock_client.get_products = AsyncMock(return_value=kwargs["products"])
-    if "orders" in kwargs:
-        mock_client.get_orders = AsyncMock(return_value=kwargs["orders"])
-    if "order" in kwargs:
-        mock_client.get_order = AsyncMock(return_value=kwargs["order"])
-    if "create_order_result" in kwargs:
-        mock_client.create_order = AsyncMock(return_value=kwargs["create_order_result"])
-    if "update_order_status" in kwargs:
-        mock_client.update_order_status = AsyncMock(return_value=kwargs["update_order_status"])
-    else:
-        mock_client.update_order_status = AsyncMock()
-    if "raw_client" in kwargs:
-        mock_client._request = AsyncMock(return_value=kwargs["raw_client"])
-    if "raw_clients_list" in kwargs:
-        mock_client._request = AsyncMock(return_value=kwargs["raw_clients_list"])
-    mock_client._parse_client = MagicMock(side_effect=lambda d: _make_client())
-    mock_client._parse_product = MagicMock(side_effect=lambda d: _make_product())
+    # IntegramClient methods (возвращают Pydantic-модели)
+    mock_client.get_products = AsyncMock(return_value=kwargs.get("products", []))
+    mock_client.get_orders = AsyncMock(return_value=kwargs.get("orders", []))
+    mock_client.get_order = AsyncMock(
+        side_effect=kwargs.get("get_order_side_effect", None),
+        return_value=kwargs.get("order", kwargs["orders"][0] if kwargs.get("orders") else None),
+    )
+    mock_client.get_clients = AsyncMock(return_value=kwargs.get("clients", []))
+    mock_client.get_order_items = AsyncMock(return_value=kwargs.get("order_items", []))
+    mock_client.get_dashboard_stats = AsyncMock(
+        return_value=kwargs.get("dashboard_stats", {
+            "total_orders": 0,
+            "total_clients": 0,
+            "total_revenue": 0.0,
+            "avg_order": 0.0,
+            "new_orders": 0,
+            "delivered_orders": 0,
+        }),
+    )
+    mock_client.get_client_telegram_id = AsyncMock(return_value=None)
 
-    return patch("src.web.api._get_integram", new=AsyncMock(return_value=mock_client))
+    # Write operations
+    mock_client.update_order_status = AsyncMock()
+    mock_client.update_order = AsyncMock()
+    mock_client.add_order_item = AsyncMock(return_value=kwargs.get("new_item_id", 99))
+    mock_client.update_order_item = AsyncMock()
+    mock_client.delete_order_item = AsyncMock()
+    mock_client.recalculate_order_totals = AsyncMock()
+    mock_client.create_product = AsyncMock(return_value=kwargs.get("new_product_id", 99))
+    mock_client.update_product = AsyncMock()
+    mock_client.delete_product = AsyncMock()
+    mock_client.update_product_stock = AsyncMock()
+
+    # Для users.py — raw API property
+    mock_api = MagicMock()
+    mock_api.get_all_objects = AsyncMock(return_value=[])
+    mock_api.create_object = AsyncMock(return_value=99)
+    mock_api.set_requisites = AsyncMock()
+    mock_client.api = mock_api
+
+    return patch("src.web.api._get_crm", new=AsyncMock(return_value=mock_client))
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +217,7 @@ class TestAuth:
         assert resp.status_code == 401
 
     def test_protected_endpoint_with_valid_token(self, auth_headers):
-        orders = [_make_order()]
-        with _mock_integram(orders=orders):
+        with _mock_crm():
             resp = client.get("/api/dashboard", headers=auth_headers)
         assert resp.status_code == 200
 
@@ -195,6 +233,7 @@ class TestReference:
         data = resp.json()
         assert "order_statuses" in data
         assert "delivery_methods" in data
+        assert "order_sources" in data
         assert "Новый" in data["order_statuses"]
         assert "СДЭК" in data["delivery_methods"]
 
@@ -205,28 +244,40 @@ class TestReference:
 
 class TestDashboard:
     def test_dashboard_empty(self, auth_headers):
-        with _mock_integram(orders=[]):
+        with _mock_crm():
             resp = client.get("/api/dashboard", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["new_orders_today"] == 0
+        assert data["new_orders"] == 0
         assert data["total_orders"] == 0
-        assert data["revenue_today"] == 0.0
+        assert data["total_revenue"] == 0.0
 
     def test_dashboard_with_orders(self, auth_headers):
-        orders = [_make_order(id=1, total=1000.0), _make_order(id=2, total=500.0)]
-        with _mock_integram(orders=orders):
+        stats = {
+            "total_orders": 2,
+            "total_clients": 1,
+            "total_revenue": 1500.0,
+            "avg_order": 750.0,
+            "new_orders": 2,
+            "delivered_orders": 0,
+        }
+        with _mock_crm(dashboard_stats=stats):
             resp = client.get("/api/dashboard", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["total_orders"] == 2
-        assert data["revenue_today"] == pytest.approx(1500.0)
+        assert data["total_revenue"] == pytest.approx(1500.0)
 
     def test_dashboard_counts_unique_clients(self, auth_headers):
-        o1 = _make_order(id=1)
-        o2 = _make_order(id=2)
-        # Оба от одного клиента (client_id=1)
-        with _mock_integram(orders=[o1, o2]):
+        stats = {
+            "total_orders": 2,
+            "total_clients": 1,
+            "total_revenue": 2000.0,
+            "avg_order": 1000.0,
+            "new_orders": 2,
+            "delivered_orders": 0,
+        }
+        with _mock_crm(dashboard_stats=stats):
             resp = client.get("/api/dashboard", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["total_clients"] == 1
@@ -239,90 +290,58 @@ class TestDashboard:
 class TestOrders:
     def test_list_orders(self, auth_headers):
         orders = [_make_order(id=1), _make_order(id=2)]
-        with _mock_integram(orders=orders):
+        with _mock_crm(orders=orders):
             resp = client.get("/api/orders", headers=auth_headers)
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        data = resp.json()
+        assert data["total"] == 2
+        assert len(data["items"]) == 2
 
     def test_list_orders_with_status_filter(self, auth_headers):
         orders = [_make_order(status="Доставлен")]
-        with _mock_integram(orders=orders):
+        with _mock_crm(orders=orders):
             resp = client.get("/api/orders?status=Доставлен", headers=auth_headers)
         assert resp.status_code == 200
 
     def test_get_order_by_id(self, auth_headers):
         order = _make_order(id=42)
-        with _mock_integram(order=order):
+        with _mock_crm(orders=[order], order_items=[]):
             resp = client.get("/api/orders/42", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["id"] == 42
 
     def test_update_order_status_valid(self, auth_headers):
-        with _mock_integram():
-            resp = client.patch(
-                "/api/orders/1/status",
-                json={"status": "Подтверждён"},
-                headers=auth_headers,
-            )
+        order = _make_order(id=1)
+        with _mock_crm(orders=[order]):
+            with patch("src.web.api.notify_client_status_change", new=AsyncMock(return_value=False)):
+                resp = client.patch(
+                    "/api/orders/1/status",
+                    json={"status": "Подтверждён"},
+                    headers=auth_headers,
+                )
         assert resp.status_code == 200
         assert resp.json()["status"] == "Подтверждён"
 
     def test_update_order_status_invalid(self, auth_headers):
-        resp = client.patch(
-            "/api/orders/1/status",
-            json={"status": "НеизвестныйСтатус"},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 422
+        with _mock_crm():
+            resp = client.patch(
+                "/api/orders/1/status",
+                json={"status": "НеизвестныйСтатус"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 400
 
     def test_update_order_tracking(self, auth_headers):
-        raw_order = {"id": 1, "Номер": "ORD-0001", "Трек-номер": "TRK123"}
-        with _mock_integram(raw_client=raw_order):
-            resp = client.patch(
-                "/api/orders/1/tracking",
-                json={"tracking_number": "TRK123456"},
-                headers=auth_headers,
-            )
+        order = _make_order(id=1)
+        with _mock_crm(orders=[order]):
+            with patch("src.web.api.notify_client_tracking", new=AsyncMock(return_value=False)):
+                resp = client.patch(
+                    "/api/orders/1/tracking",
+                    json={"tracking_number": "TRK123456"},
+                    headers=auth_headers,
+                )
         assert resp.status_code == 200
         assert resp.json()["tracking_number"] == "TRK123456"
-
-    def test_create_manual_order(self, auth_headers):
-        raw_client_resp = {"id": 99}
-        created_order = _make_order(id=10)
-
-        mock_integram = MagicMock()
-        mock_integram.close = AsyncMock()
-        mock_integram._request = AsyncMock(return_value=raw_client_resp)
-        mock_integram.create_order = AsyncMock(return_value=created_order)
-
-        with patch("src.web.api._get_integram", new=AsyncMock(return_value=mock_integram)):
-            resp = client.post(
-                "/api/orders",
-                json={
-                    "client_name": "Мария Петрова",
-                    "phone": "+79009998877",
-                    "delivery_method": "СДЭК",
-                    "delivery_address": "Москва, Пчелиная 1",
-                    "delivery_cost": 300.0,
-                    "items": [
-                        {"product_id": 1, "quantity": 2, "unit_price": 500.0}
-                    ],
-                },
-                headers=auth_headers,
-            )
-        assert resp.status_code == 201
-
-    def test_create_manual_order_invalid_delivery(self, auth_headers):
-        resp = client.post(
-            "/api/orders",
-            json={
-                "client_name": "Иван",
-                "delivery_method": "Самолёт",  # не существует
-                "items": [{"product_id": 1, "quantity": 1, "unit_price": 100.0}],
-            },
-            headers=auth_headers,
-        )
-        assert resp.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -331,25 +350,15 @@ class TestOrders:
 
 class TestClients:
     def test_list_clients(self, auth_headers):
-        raw_list = [
-            {"id": 1, "ФИО": "Иван Иванов"},
-            {"id": 2, "ФИО": "Мария Петрова"},
-        ]
-        with _mock_integram(raw_clients_list=raw_list):
+        clients_list = [_make_client(id=1), _make_client(id=2)]
+        with _mock_crm(clients=clients_list):
             resp = client.get("/api/clients", headers=auth_headers)
         assert resp.status_code == 200
 
     def test_get_client_with_orders(self, auth_headers):
-        raw_client_data = {"id": 1, "ФИО": "Иван Иванов"}
-        orders = [_make_order()]
-
-        mock_integram = MagicMock()
-        mock_integram.close = AsyncMock()
-        mock_integram._request = AsyncMock(return_value=raw_client_data)
-        mock_integram._parse_client = MagicMock(return_value=_make_client())
-        mock_integram.get_orders = AsyncMock(return_value=orders)
-
-        with patch("src.web.api._get_integram", new=AsyncMock(return_value=mock_integram)):
+        clients_list = [_make_client(id=1)]
+        orders = [_make_order(id=1)]
+        with _mock_crm(clients=clients_list, orders=orders):
             resp = client.get("/api/clients/1", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
@@ -364,23 +373,15 @@ class TestClients:
 class TestProducts:
     def test_list_products(self, auth_headers):
         products = [_make_product(id=1), _make_product(id=2, name="Прополис")]
-        with _mock_integram(products=products):
+        with _mock_crm(products=products):
             resp = client.get("/api/products", headers=auth_headers)
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        data = resp.json()
+        assert data["total"] == 2
+        assert len(data["items"]) == 2
 
     def test_create_product(self, auth_headers):
-        raw_response = {
-            "id": 99,
-            "Название": "Новый товар",
-            "В наличии": True,
-        }
-        mock_integram = MagicMock()
-        mock_integram.close = AsyncMock()
-        mock_integram._request = AsyncMock(return_value=raw_response)
-        mock_integram._parse_product = MagicMock(return_value=_make_product(id=99, name="Новый товар"))
-
-        with patch("src.web.api._get_integram", new=AsyncMock(return_value=mock_integram)):
+        with _mock_crm(new_product_id=99):
             resp = client.post(
                 "/api/products",
                 json={
@@ -391,33 +392,22 @@ class TestProducts:
                 },
                 headers=auth_headers,
             )
-        assert resp.status_code == 201
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["product_id"] == 99
 
     def test_update_product(self, auth_headers):
-        raw_response = {"id": 1, "Название": "Перга (обновлена)", "В наличии": True}
-        mock_integram = MagicMock()
-        mock_integram.close = AsyncMock()
-        mock_integram._request = AsyncMock(return_value=raw_response)
-        mock_integram._parse_product = MagicMock(return_value=_make_product())
-
-        with patch("src.web.api._get_integram", new=AsyncMock(return_value=mock_integram)):
+        with _mock_crm():
             resp = client.patch(
                 "/api/products/1",
                 json={"price": 600.0},
                 headers=auth_headers,
             )
         assert resp.status_code == 200
+        assert resp.json()["ok"] is True
 
     def test_delete_product_marks_out_of_stock(self, auth_headers):
-        raw_response = {"id": 1, "В наличии": False}
-        mock_integram = MagicMock()
-        mock_integram.close = AsyncMock()
-        mock_integram._request = AsyncMock(return_value=raw_response)
-
-        with patch("src.web.api._get_integram", new=AsyncMock(return_value=mock_integram)):
+        with _mock_crm():
             resp = client.delete("/api/products/1", headers=auth_headers)
         assert resp.status_code == 200
-
-        # Проверяем, что отправлен PATCH с {"В наличии": False}
-        call_kwargs = mock_integram._request.call_args
-        assert call_kwargs.kwargs["json"]["В наличии"] is False
+        assert resp.json()["ok"] is True

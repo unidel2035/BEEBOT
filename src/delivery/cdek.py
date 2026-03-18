@@ -32,6 +32,7 @@ _API_BASE = "https://api.cdek.ru/v2"
 _TOKEN_URL = f"{_API_BASE}/oauth/token"
 _CITIES_URL = f"{_API_BASE}/location/cities"
 _CALC_URL = f"{_API_BASE}/calculator/tarifflist"
+_ORDERS_URL = f"{_API_BASE}/orders"
 
 # Код Москвы в СДЭК
 _MOSCOW_CODE = 44
@@ -212,4 +213,42 @@ class CDEKProvider(BaseDeliveryProvider):
         raise NotImplementedError("CDEKProvider.create_shipment не реализован")
 
     async def track_shipment(self, tracking_number: str) -> dict:
-        raise NotImplementedError("CDEKProvider.track_shipment не реализован")
+        """Получить статус отправления СДЭК по трек-номеру (cdek_number или im_number)."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                token = await _get_token(client)
+                if not token:
+                    return {"status": "Неизвестно", "description": "Нет токена СДЭК"}
+
+                resp = await client.get(
+                    _ORDERS_URL,
+                    params={"cdek_number": tracking_number},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code != 200:
+                    # Попробовать по im_number
+                    resp = await client.get(
+                        _ORDERS_URL,
+                        params={"im_number": tracking_number},
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                if resp.status_code != 200:
+                    return {"status": "Неизвестно", "description": f"СДЭК HTTP {resp.status_code}"}
+
+                data = resp.json()
+                entity = data.get("entity", {})
+                statuses = entity.get("statuses", [])
+                if not statuses:
+                    return {"status": "Неизвестно", "description": "Нет данных о статусе"}
+
+                latest = statuses[0]  # самый свежий — первый
+                return {
+                    "status": latest.get("name", "Неизвестно"),
+                    "description": latest.get("city", ""),
+                    "code": latest.get("code", ""),
+                    "date": latest.get("date_time", ""),
+                }
+
+        except Exception as e:
+            logger.warning("СДЭК tracking ошибка: %s", e)
+            return {"status": "Неизвестно", "description": str(e)}

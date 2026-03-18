@@ -28,14 +28,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import csv
+import io
+import json as json_lib
 import logging
 import os
 import secrets
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from pydantic import BaseModel
@@ -43,34 +49,14 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from src.integram_api import (
-    IntegramAPI,
-    IntegramAPIError,
-    REQ_CLIENT_TG_ID,
-    TABLE_ORDERS,
-    TABLE_ORDER_ITEMS,
-    TABLE_PRODUCTS,
-    REQ_ORDER_STATUS,
-    REQ_ORDER_TRACKING,
-    REQ_ORDER_ADDRESS,
-    REQ_ORDER_DELIVERY_COST,
-    REQ_ORDER_DELIVERY_METHOD,
-    REQ_ORDER_COMMENT,
-    REQ_ORDER_ITEMS_TOTAL,
-    REQ_ORDER_TOTAL,
-    REQ_ITEM_ORDER,
-    REQ_ITEM_PRODUCT,
-    REQ_ITEM_QTY,
-    REQ_ITEM_PRICE,
-    REQ_ITEM_SUM,
-    REQ_PRODUCT_PRICE,
-    REQ_PRODUCT_WEIGHT,
-    REQ_PRODUCT_DESC,
-    REQ_PRODUCT_INSTOCK,
-    REQ_PRODUCT_SKU,
-    REQ_PRODUCT_CATEGORY,
-    REQ_PRODUCT_SHORT,
-    REQ_PRODUCT_STOCK,
+from src.integram_api import IntegramAPIError
+from src.integram_client import IntegramClient, IntegramError, IntegramNotFoundError
+from src.crm_constants import (
+    STATUS_IDS,
+    DELIVERY_IDS as DELIVERY_METHOD_IDS,
+    SOURCE_IDS,
+    ORDER_STATUSES,
+    DELIVERY_METHODS,
 )
 from src.web.notifications import notify_client_status_change, notify_client_tracking
 from src.web.users import (
@@ -90,7 +76,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _WEB_USERNAME = os.getenv("WEB_USERNAME", "admin")
-_WEB_PASSWORD = os.getenv("WEB_PASSWORD", "changeme")
+_WEB_PASSWORD = os.getenv("WEB_PASSWORD", "")
+if not _WEB_PASSWORD:
+    raise RuntimeError(
+        "WEB_PASSWORD не задан! Установите переменную окружения WEB_PASSWORD в .env"
+    )
 _WEB_SECRET = os.getenv("WEB_SECRET", "")
 if not _WEB_SECRET:
     _WEB_SECRET = secrets.token_hex(32)
@@ -102,15 +92,11 @@ _ALGORITHM = "HS256"
 # CORS
 # ---------------------------------------------------------------------------
 
-_CORS_ORIGINS_RAW = os.getenv("WEB_CORS_ORIGINS", "*")
+_CORS_ORIGINS_RAW = os.getenv("WEB_CORS_ORIGINS", "http://185.233.200.13:8088,http://localhost:5173")
 _CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()]
 
 # ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Rate limiting
+# FastAPI app + Rate limiting
 # ---------------------------------------------------------------------------
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -132,6 +118,17 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
         content={"detail": "Слишком много запросов, попробуйте позже"},
     )
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Не отдавать внутренние traceback клиенту."""
+    from fastapi.responses import JSONResponse
+    logger.error("Необработанная ошибка: %s %s — %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Внутренняя ошибка сервера"},
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
@@ -143,7 +140,7 @@ app.add_middleware(
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 # ---------------------------------------------------------------------------
-# Pydantic-схемы
+# Pydantic-схемы запросов/ответов
 # ---------------------------------------------------------------------------
 
 class TokenResponse(BaseModel):
@@ -168,6 +165,118 @@ class DashboardStats(BaseModel):
 class ReferenceData(BaseModel):
     order_statuses: list[str]
     delivery_methods: list[str]
+    order_sources: list[str]
+
+
+class StatusUpdate(BaseModel):
+    status: str
+
+
+class TrackingUpdate(BaseModel):
+    tracking_number: str
+
+
+class OrderUpdate(BaseModel):
+    delivery_address: Optional[str] = None
+    delivery_method: Optional[str] = None
+    delivery_cost: Optional[float] = None
+    comment: Optional[str] = None
+
+
+class ItemCreate(BaseModel):
+    product_id: int
+    quantity: int = 1
+    unit_price: float
+
+
+class ItemUpdate(BaseModel):
+    quantity: Optional[int] = None
+    unit_price: Optional[float] = None
+
+
+class ProductCreate(BaseModel):
+    name: str
+    category: Optional[str] = None
+    price: Optional[float] = None
+    weight: Optional[float] = None
+    description: Optional[str] = None
+    in_stock: bool = True
+    sku_uds: Optional[str] = None
+    short_name: Optional[str] = None
+    stock: Optional[int] = None
+
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    price: Optional[float] = None
+    weight: Optional[float] = None
+    description: Optional[str] = None
+    in_stock: Optional[bool] = None
+    sku_uds: Optional[str] = None
+    short_name: Optional[str] = None
+    stock: Optional[int] = None
+
+
+class StockUpdate(BaseModel):
+    stock: int
+
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    role: str
+    display_name: str = ""
+
+
+class UserUpdate(BaseModel):
+    password: Optional[str] = None
+    role: Optional[str] = None
+    display_name: Optional[str] = None
+    active: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# Пагинация и поиск
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PAGE_SIZE = 50
+_MAX_PAGE_SIZE = 200
+
+
+def _paginate(
+    items: list[dict],
+    page: int = 1,
+    per_page: int = _DEFAULT_PAGE_SIZE,
+    search: Optional[str] = None,
+    search_fields: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Пагинация + поиск по списку элементов.
+
+    Returns:
+        {"items": [...], "total": N, "page": P, "per_page": PP, "pages": T}
+    """
+    # Текстовый поиск
+    if search and search_fields:
+        q = search.lower()
+        items = [
+            item for item in items
+            if any(q in str(item.get(f, "")).lower() for f in search_fields)
+        ]
+
+    total = len(items)
+    per_page = min(max(per_page, 1), _MAX_PAGE_SIZE)
+    page = max(page, 1)
+    pages = max((total + per_page - 1) // per_page, 1)
+    start = (page - 1) * per_page
+
+    return {
+        "items": items[start:start + per_page],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -210,38 +319,54 @@ def _require_role(*roles: str):
 
 
 # ---------------------------------------------------------------------------
-# Хелпер: аутентифицированный Integram-клиент
+# Хелпер: аутентифицированный CRM-клиент
 # ---------------------------------------------------------------------------
 
-async def _get_integram() -> IntegramAPI:
-    client = IntegramAPI()
+async def _get_crm() -> IntegramClient:
+    """Создать и авторизовать CRM-клиент."""
+    client = IntegramClient()
     await client.authenticate()
     return client
 
 
-async def _find_order(integram: IntegramAPI, order_id: int) -> Optional[dict]:
-    """Найти заказ по ID (среди всех заказов)."""
-    orders = await integram.get_orders()
-    for o in orders:
-        if o["id"] == order_id:
-            return o
-    return None
+EDITABLE_STATUSES = {"Новый", "Подтверждён", "В сборке"}
+
+# Переходы статусов, доступные складу
+_WAREHOUSE_STATUS_TRANSITIONS = {
+    ("Подтверждён", "В сборке"),
+    ("В сборке", "Отправлен"),
+}
+
+_MONTH_NAMES = {
+    1: "Янв", 2: "Фев", 3: "Мар", 4: "Апр",
+    5: "Май", 6: "Июн", 7: "Июл", 8: "Авг",
+    9: "Сен", 10: "Окт", 11: "Ноя", 12: "Дек",
+}
 
 
-async def _get_client_telegram_id(integram: IntegramAPI, client_id: Optional[int]) -> Optional[int]:
-    """Получить Telegram ID клиента по его ID в CRM."""
-    if not client_id:
-        return None
-    clients = await integram.get_clients()
-    for c in clients:
-        if c["id"] == client_id:
-            tg_id = c.get("telegram_id", "")
-            if tg_id:
-                try:
-                    return int(tg_id)
-                except (ValueError, TypeError):
-                    return None
-    return None
+def _order_to_dict(order) -> dict[str, Any]:
+    """Конвертировать Order-модель в dict для JSON-ответа."""
+    d = order.model_dump()
+    # Дата → строка для фронтенда
+    if order.date:
+        d["date"] = order.date.strftime("%d.%m.%Y %H:%M:%S")
+    # items → list[dict]
+    if order.items:
+        d["items"] = [i.model_dump() for i in order.items]
+    return d
+
+
+def _client_to_dict(client) -> dict[str, Any]:
+    """Конвертировать Client-модель в dict для JSON-ответа."""
+    d = client.model_dump()
+    # Переименовать full_name → name для совместимости с фронтом
+    d["name"] = d.pop("full_name", "")
+    return d
+
+
+def _product_to_dict(product) -> dict[str, Any]:
+    """Конвертировать Product-модель в dict для JSON-ответа."""
+    return product.model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -259,11 +384,11 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()) -> TokenRespon
 
     # 1. Попробовать найти пользователя в CRM
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            user = await get_user_by_username(integram, form_data.username)
+            user = await get_user_by_username(crm.api, form_data.username)
         finally:
-            await integram.close()
+            await crm.close()
 
         if user and user.get("active") and verify_password(form_data.password, user["password_hash"]):
             token = _create_token(user["username"], role=user["role"])
@@ -289,14 +414,6 @@ async def get_me(user: CurrentUser = Depends(_get_current_user)) -> dict:
 # Справочники
 # ---------------------------------------------------------------------------
 
-from src.crm_constants import (
-    STATUS_IDS,
-    DELIVERY_IDS as DELIVERY_METHOD_IDS,
-    CATEGORY_IDS,
-    ORDER_STATUSES,
-    DELIVERY_METHODS,
-)
-
 @app.get("/api/reference", response_model=ReferenceData, tags=["reference"])
 async def get_reference(
     _: CurrentUser = Depends(_require_role("admin", "warehouse")),
@@ -304,6 +421,7 @@ async def get_reference(
     return ReferenceData(
         order_statuses=ORDER_STATUSES,
         delivery_methods=DELIVERY_METHODS,
+        order_sources=list(SOURCE_IDS.keys()),
     )
 
 
@@ -315,15 +433,15 @@ async def get_reference(
 async def get_dashboard(
     _: CurrentUser = Depends(_require_role("admin")),
 ) -> DashboardStats:
-    """Статистика за день и неделю."""
+    """Статистика."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            stats = await integram.get_dashboard_stats()
+            stats = await crm.get_dashboard_stats()
             return DashboardStats(**stats)
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(status_code=502, detail="Ошибка CRM")
 
@@ -333,44 +451,25 @@ async def get_dashboard_charts(
     _: CurrentUser = Depends(_require_role("admin")),
 ) -> dict[str, Any]:
     """Данные для графиков дашборда: выручка по месяцам, воронка статусов, доставка."""
-    import re
-    from collections import defaultdict
-
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            orders = await integram.get_orders()
+            orders = await crm.get_orders()
 
             # --- Выручка и количество заказов по месяцам ---
             monthly_revenue: dict[str, float] = defaultdict(float)
             monthly_count: dict[str, int] = defaultdict(int)
             for o in orders:
-                # Дата в формате "DD.MM.YYYY HH:MM:SS"
-                date_str = o.get("date", "")
-                month_key = None
-                if date_str:
-                    m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", date_str)
-                    if m:
-                        month_key = f"{m.group(3)}-{m.group(2)}"
-                # Отфильтровать мусорные даты (только 2024-2030)
-                if month_key and "2024" <= month_key <= "2030":
-                    monthly_revenue[month_key] += o.get("total") or 0
+                if o.date and 2024 <= o.date.year <= 2030:
+                    month_key = f"{o.date.year}-{o.date.month:02d}"
+                    monthly_revenue[month_key] += o.total or 0
                     monthly_count[month_key] += 1
 
-            # Сортировать по ключу (YYYY-MM)
             sorted_months = sorted(monthly_revenue.keys())
             month_labels = []
-            _MONTH_NAMES = {
-                "01": "Янв", "02": "Фев", "03": "Мар", "04": "Апр",
-                "05": "Май", "06": "Июн", "07": "Июл", "08": "Авг",
-                "09": "Сен", "10": "Окт", "11": "Ноя", "12": "Дек",
-            }
             for mk in sorted_months:
-                parts = mk.split("-")
-                if len(parts) == 2:
-                    month_labels.append(f"{_MONTH_NAMES.get(parts[1], parts[1])} {parts[0][-2:]}")
-                else:
-                    month_labels.append(mk)
+                year, month = mk.split("-")
+                month_labels.append(f"{_MONTH_NAMES.get(int(month), month)} {year[-2:]}")
 
             revenue_data = [monthly_revenue[m] for m in sorted_months]
             count_data = [monthly_count[m] for m in sorted_months]
@@ -378,8 +477,7 @@ async def get_dashboard_charts(
             # --- Воронка статусов ---
             status_counts: dict[str, int] = defaultdict(int)
             for o in orders:
-                s = o.get("status", "Неизвестно")
-                status_counts[s] += 1
+                status_counts[o.status or "Неизвестно"] += 1
 
             funnel_labels = ORDER_STATUSES
             funnel_data = [status_counts.get(s, 0) for s in funnel_labels]
@@ -387,8 +485,7 @@ async def get_dashboard_charts(
             # --- Способы доставки ---
             delivery_counts: dict[str, int] = defaultdict(int)
             for o in orders:
-                dm = o.get("delivery_method") or "Не указан"
-                delivery_counts[dm] += 1
+                delivery_counts[o.delivery_method or "Не указан"] += 1
 
             delivery_labels = list(delivery_counts.keys())
             delivery_data = [delivery_counts[k] for k in delivery_labels]
@@ -409,8 +506,8 @@ async def get_dashboard_charts(
                 },
             }
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -422,22 +519,28 @@ async def get_dashboard_charts(
 @app.get("/api/orders", tags=["orders"])
 async def list_orders(
     status: Optional[str] = None,
+    source: Optional[str] = None,
     client_id: Optional[int] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    per_page: int = _DEFAULT_PAGE_SIZE,
     user: CurrentUser = Depends(_require_role("admin", "warehouse")),
-) -> list[dict[str, Any]]:
-    """Список заказов."""
+) -> dict[str, Any]:
+    """Список заказов с пагинацией и поиском."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            orders = await integram.get_orders()
-            if status:
-                orders = [o for o in orders if o.get("status") == status]
-            if client_id:
-                orders = [o for o in orders if o.get("client_id") == client_id]
-            return orders
+            orders = await crm.get_orders(client_id=client_id, status=status)
+            result = [_order_to_dict(o) for o in orders]
+            if source:
+                result = [o for o in result if o.get("source") == source]
+            return _paginate(
+                result, page, per_page, search,
+                search_fields=["number", "client_name", "delivery_address", "comment"],
+            )
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(status_code=502, detail="Ошибка CRM")
 
@@ -449,61 +552,25 @@ async def get_order(
 ) -> dict[str, Any]:
     """Получить заказ по ID с позициями."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            orders = await integram.get_orders()
-            for o in orders:
-                if o["id"] == order_id:
-                    o["items"] = await integram.get_order_items(order_id)
-                    o["editable"] = o.get("status") in EDITABLE_STATUSES
-                    return o
+            order = await crm.get_order(order_id)
+            order.items = await crm.get_order_items(order_id)
+            d = _order_to_dict(order)
+            d["editable"] = order.status in EDITABLE_STATUSES
+            return d
+        except IntegramNotFoundError:
             raise HTTPException(status_code=404, detail="Заказ не найден")
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
-# Обновление заказов (статус, трек-номер)
+# Обновление заказов (статус, трек-номер, поля)
 # ---------------------------------------------------------------------------
-
-EDITABLE_STATUSES = {"Новый", "Подтверждён", "В сборке"}
-
-
-class StatusUpdate(BaseModel):
-    status: str
-
-
-class TrackingUpdate(BaseModel):
-    tracking_number: str
-
-
-class OrderUpdate(BaseModel):
-    delivery_address: Optional[str] = None
-    delivery_method: Optional[str] = None
-    delivery_cost: Optional[float] = None
-    comment: Optional[str] = None
-
-
-class ItemCreate(BaseModel):
-    product_id: int
-    quantity: int = 1
-    unit_price: float
-
-
-class ItemUpdate(BaseModel):
-    quantity: Optional[int] = None
-    unit_price: Optional[float] = None
-
-
-# Переходы статусов, доступные складу
-_WAREHOUSE_STATUS_TRANSITIONS = {
-    ("Подтверждён", "В сборке"),
-    ("В сборке", "Отправлен"),
-}
-
 
 @app.patch("/api/orders/{order_id}/status", tags=["orders"])
 async def update_order_status(
@@ -515,41 +582,45 @@ async def update_order_status(
     if body.status not in STATUS_IDS:
         raise HTTPException(400, f"Неизвестный статус: {body.status}")
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
             # Проверка прав warehouse: только разрешённые переходы
             if user.role == "warehouse":
-                order = await _find_order(integram, order_id)
-                if not order:
+                try:
+                    order = await crm.get_order(order_id)
+                except IntegramNotFoundError:
                     raise HTTPException(404, "Заказ не найден")
-                current_status = order.get("status", "")
-                if (current_status, body.status) not in _WAREHOUSE_STATUS_TRANSITIONS:
-                    raise HTTPException(403, f"Склад не может менять статус с «{current_status}» на «{body.status}»")
+                if (order.status, body.status) not in _WAREHOUSE_STATUS_TRANSITIONS:
+                    raise HTTPException(403, f"Склад не может менять статус с «{order.status}» на «{body.status}»")
 
-            await integram.set_requisites(order_id, TABLE_ORDERS, {
-                REQ_ORDER_STATUS: STATUS_IDS[body.status],
-            })
+            await crm.update_order_status(order_id, body.status)
 
             # Уведомить клиента в Telegram
             notified = False
             try:
-                order = await _find_order(integram, order_id)
-                if order:
-                    tg_id = await _get_client_telegram_id(integram, order.get("client_id"))
+                order = await crm.get_order(order_id)
+                if order.client_id:
+                    tg_id = await crm.get_client_telegram_id(order.client_id)
                     if tg_id:
                         notified = await notify_client_status_change(
                             telegram_id=tg_id,
-                            order_number=order.get("number", str(order_id)),
+                            order_number=order.number or str(order_id),
                             new_status=body.status,
-                            tracking_number=order.get("tracking_number"),
+                            tracking_number=order.tracking_number,
                         )
             except Exception as e:
                 logger.warning("Не удалось уведомить клиента: %s", e)
 
+            # SSE: уведомить веб-панель
+            await push_event("order_status", {
+                "order_id": order_id,
+                "status": body.status,
+            })
+
             return {"ok": True, "order_id": order_id, "status": body.status, "notified": notified}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -562,51 +633,37 @@ async def update_order_tracking(
 ) -> dict:
     """Ввести трек-номер и уведомить клиента."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            await integram.set_requisites(order_id, TABLE_ORDERS, {
-                REQ_ORDER_TRACKING: body.tracking_number,
-            })
+            await crm.update_order(order_id, tracking_number=body.tracking_number)
 
             # Уведомить клиента
             notified = False
             try:
-                order = await _find_order(integram, order_id)
-                if order:
-                    tg_id = await _get_client_telegram_id(integram, order.get("client_id"))
+                order = await crm.get_order(order_id)
+                if order.client_id:
+                    tg_id = await crm.get_client_telegram_id(order.client_id)
                     if tg_id:
                         notified = await notify_client_tracking(
                             telegram_id=tg_id,
-                            order_number=order.get("number", str(order_id)),
+                            order_number=order.number or str(order_id),
                             tracking_number=body.tracking_number,
                         )
             except Exception as e:
                 logger.warning("Не удалось уведомить клиента: %s", e)
 
+            # SSE: уведомить веб-панель
+            await push_event("order_tracking", {
+                "order_id": order_id,
+                "tracking_number": body.tracking_number,
+            })
+
             return {"ok": True, "order_id": order_id, "tracking_number": body.tracking_number, "notified": notified}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
-
-
-# ---------------------------------------------------------------------------
-# Редактирование заказа (до отправки)
-# ---------------------------------------------------------------------------
-
-
-async def _check_editable(integram: IntegramAPI, order_id: int) -> dict:
-    """Проверить, что заказ существует и доступен для редактирования."""
-    order = await _find_order(integram, order_id)
-    if not order:
-        raise HTTPException(404, "Заказ не найден")
-    if order.get("status") not in EDITABLE_STATUSES:
-        raise HTTPException(
-            409,
-            f"Заказ в статусе «{order.get('status')}» нельзя редактировать",
-        )
-    return order
 
 
 @app.patch("/api/orders/{order_id}", tags=["orders"])
@@ -617,34 +674,40 @@ async def update_order(
 ) -> dict:
     """Обновить поля заказа (адрес, доставку, комментарий)."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            await _check_editable(integram, order_id)
+            # Проверить что заказ доступен для редактирования
+            try:
+                order = await crm.get_order(order_id)
+            except IntegramNotFoundError:
+                raise HTTPException(404, "Заказ не найден")
+            if order.status not in EDITABLE_STATUSES:
+                raise HTTPException(409, f"Заказ в статусе «{order.status}» нельзя редактировать")
 
-            reqs: dict[str, str] = {}
+            # Валидация способа доставки
+            if body.delivery_method is not None and body.delivery_method not in DELIVERY_METHOD_IDS:
+                raise HTTPException(400, f"Неизвестный способ доставки: {body.delivery_method}")
+
+            # Собрать kwargs для update_order
+            kwargs: dict[str, Any] = {}
             if body.delivery_address is not None:
-                reqs[REQ_ORDER_ADDRESS] = body.delivery_address
+                kwargs["delivery_address"] = body.delivery_address
             if body.delivery_method is not None:
-                mid = DELIVERY_METHOD_IDS.get(body.delivery_method)
-                if not mid:
-                    raise HTTPException(400, f"Неизвестный способ доставки: {body.delivery_method}")
-                reqs[REQ_ORDER_DELIVERY_METHOD] = mid
+                kwargs["delivery_method"] = body.delivery_method
             if body.delivery_cost is not None:
-                reqs[REQ_ORDER_DELIVERY_COST] = str(body.delivery_cost)
+                kwargs["delivery_cost"] = body.delivery_cost
                 # Пересчитать итого
-                order = await _find_order(integram, order_id)
-                items_total = order.get("items_total") or 0
-                reqs[REQ_ORDER_TOTAL] = str(items_total + body.delivery_cost)
+                kwargs["total"] = (order.items_total or 0) + body.delivery_cost
             if body.comment is not None:
-                reqs[REQ_ORDER_COMMENT] = body.comment
+                kwargs["comment"] = body.comment
 
-            if reqs:
-                await integram.set_requisites(order_id, TABLE_ORDERS, reqs)
+            if kwargs:
+                await crm.update_order(order_id, **kwargs)
 
             return {"ok": True, "order_id": order_id}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -653,7 +716,6 @@ async def update_order(
 # Позиции заказа
 # ---------------------------------------------------------------------------
 
-
 @app.get("/api/orders/{order_id}/items", tags=["order-items"])
 async def get_order_items(
     order_id: int,
@@ -661,12 +723,13 @@ async def get_order_items(
 ) -> list[dict]:
     """Получить позиции заказа."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            return await integram.get_order_items(order_id)
+            items = await crm.get_order_items(order_id)
+            return [i.model_dump() for i in items]
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -679,28 +742,25 @@ async def add_order_item(
 ) -> dict:
     """Добавить позицию к заказу."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            await _check_editable(integram, order_id)
+            # Проверить что заказ доступен для редактирования
+            try:
+                order = await crm.get_order(order_id)
+            except IntegramNotFoundError:
+                raise HTTPException(404, "Заказ не найден")
+            if order.status not in EDITABLE_STATUSES:
+                raise HTTPException(409, f"Заказ в статусе «{order.status}» нельзя редактировать")
 
-            item_reqs = {
-                REQ_ITEM_ORDER: str(order_id),
-                REQ_ITEM_PRODUCT: str(body.product_id),
-                REQ_ITEM_QTY: str(body.quantity),
-                REQ_ITEM_PRICE: str(body.unit_price),
-                REQ_ITEM_SUM: str(body.quantity * body.unit_price),
-            }
-            item_id = await integram.create_object(
-                TABLE_ORDER_ITEMS, "Позиция заказа", item_reqs,
+            item_id = await crm.add_order_item(
+                order_id, body.product_id, body.quantity, body.unit_price,
             )
-
-            # Пересчитать итого заказа
-            await _recalculate_totals(integram, order_id)
+            await crm.recalculate_order_totals(order_id)
 
             return {"ok": True, "item_id": item_id}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -714,32 +774,32 @@ async def update_order_item(
 ) -> dict:
     """Изменить количество/цену позиции."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            await _check_editable(integram, order_id)
+            # Проверить что заказ доступен для редактирования
+            try:
+                order = await crm.get_order(order_id)
+            except IntegramNotFoundError:
+                raise HTTPException(404, "Заказ не найден")
+            if order.status not in EDITABLE_STATUSES:
+                raise HTTPException(409, f"Заказ в статусе «{order.status}» нельзя редактировать")
 
-            # Получить текущую позицию для пересчёта суммы
-            items = await integram.get_order_items(order_id)
-            current = next((i for i in items if i["id"] == item_id), None)
+            # Получить текущую позицию для дефолтных значений
+            items = await crm.get_order_items(order_id)
+            current = next((i for i in items if i.id == item_id), None)
             if not current:
                 raise HTTPException(404, "Позиция не найдена")
 
-            qty = body.quantity if body.quantity is not None else current["quantity"]
-            price = body.unit_price if body.unit_price is not None else current["unit_price"]
+            qty = body.quantity if body.quantity is not None else current.quantity
+            price = body.unit_price if body.unit_price is not None else current.unit_price
 
-            reqs = {
-                REQ_ITEM_QTY: str(qty),
-                REQ_ITEM_PRICE: str(price),
-                REQ_ITEM_SUM: str(qty * price),
-            }
-            await integram.set_requisites(item_id, TABLE_ORDER_ITEMS, reqs)
-
-            await _recalculate_totals(integram, order_id)
+            await crm.update_order_item(item_id, qty=qty, price=price)
+            await crm.recalculate_order_totals(order_id)
 
             return {"ok": True, "item_id": item_id}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -752,34 +812,25 @@ async def delete_order_item(
 ) -> dict:
     """Удалить позицию из заказа."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            await _check_editable(integram, order_id)
+            # Проверить что заказ доступен для редактирования
+            try:
+                order = await crm.get_order(order_id)
+            except IntegramNotFoundError:
+                raise HTTPException(404, "Заказ не найден")
+            if order.status not in EDITABLE_STATUSES:
+                raise HTTPException(409, f"Заказ в статусе «{order.status}» нельзя редактировать")
 
-            await integram.delete_object(item_id)
-            await _recalculate_totals(integram, order_id)
+            await crm.delete_order_item(item_id)
+            await crm.recalculate_order_totals(order_id)
 
             return {"ok": True, "item_id": item_id}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
-
-
-async def _recalculate_totals(integram: IntegramAPI, order_id: int) -> None:
-    """Пересчитать суммы заказа на основе позиций."""
-    items = await integram.get_order_items(order_id)
-    items_total = sum(i["quantity"] * i["unit_price"] for i in items)
-
-    order = await _find_order(integram, order_id)
-    delivery_cost = (order.get("delivery_cost") or 0) if order else 0
-    total = items_total + delivery_cost
-
-    await integram.set_requisites(order_id, TABLE_ORDERS, {
-        REQ_ORDER_ITEMS_TOTAL: str(items_total),
-        REQ_ORDER_TOTAL: str(total),
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -788,16 +839,24 @@ async def _recalculate_totals(integram: IntegramAPI, order_id: int) -> None:
 
 @app.get("/api/clients", tags=["clients"])
 async def list_clients(
+    search: Optional[str] = None,
+    page: int = 1,
+    per_page: int = _DEFAULT_PAGE_SIZE,
     _: CurrentUser = Depends(_require_role("admin")),
-) -> list[dict[str, Any]]:
-    """Список всех клиентов."""
+) -> dict[str, Any]:
+    """Список клиентов с пагинацией и поиском."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            return await integram.get_clients()
+            clients = await crm.get_clients()
+            result = [_client_to_dict(c) for c in clients]
+            return _paginate(
+                result, page, per_page, search,
+                search_fields=["name", "phone", "address", "city", "telegram_username"],
+            )
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(status_code=502, detail="Ошибка CRM")
 
@@ -809,23 +868,20 @@ async def get_client(
 ) -> dict[str, Any]:
     """Клиент + история заказов."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            clients = await integram.get_clients()
-            client = None
-            for c in clients:
-                if c["id"] == client_id:
-                    client = c
-                    break
+            clients = await crm.get_clients()
+            client = next((c for c in clients if c.id == client_id), None)
             if not client:
                 raise HTTPException(status_code=404, detail="Клиент не найден")
 
-            orders = await integram.get_orders()
-            client["orders"] = [o for o in orders if o.get("client_id") == client_id]
-            return client
+            orders = await crm.get_orders(client_id=client_id)
+            result = _client_to_dict(client)
+            result["orders"] = [_order_to_dict(o) for o in orders]
+            return result
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(status_code=502, detail="Ошибка CRM")
 
@@ -837,53 +893,26 @@ async def get_client(
 @app.get("/api/products", tags=["products"])
 async def list_products(
     in_stock_only: bool = False,
+    search: Optional[str] = None,
+    page: int = 1,
+    per_page: int = _DEFAULT_PAGE_SIZE,
     _: CurrentUser = Depends(_require_role("admin", "warehouse")),
-) -> list[dict[str, Any]]:
-    """Список всех товаров."""
+) -> dict[str, Any]:
+    """Список товаров с пагинацией и поиском."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            products = await integram.get_products()
-            if in_stock_only:
-                products = [p for p in products if p.get("in_stock")]
-            return products
+            products = await crm.get_products(in_stock_only=in_stock_only)
+            result = [_product_to_dict(p) for p in products]
+            return _paginate(
+                result, page, per_page, search,
+                search_fields=["name", "category", "description", "sku_uds"],
+            )
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(status_code=502, detail="Ошибка CRM")
-
-
-# ---------------------------------------------------------------------------
-# Товары: CRUD + остатки
-# ---------------------------------------------------------------------------
-
-class ProductCreate(BaseModel):
-    name: str
-    category: Optional[str] = None
-    price: Optional[float] = None
-    weight: Optional[float] = None
-    description: Optional[str] = None
-    in_stock: bool = True
-    sku_uds: Optional[str] = None
-    short_name: Optional[str] = None
-    stock: Optional[int] = None
-
-
-class ProductUpdate(BaseModel):
-    name: Optional[str] = None
-    category: Optional[str] = None
-    price: Optional[float] = None
-    weight: Optional[float] = None
-    description: Optional[str] = None
-    in_stock: Optional[bool] = None
-    sku_uds: Optional[str] = None
-    short_name: Optional[str] = None
-    stock: Optional[int] = None
-
-
-class StockUpdate(BaseModel):
-    stock: int
 
 
 @app.post("/api/products", tags=["products"])
@@ -893,31 +922,23 @@ async def create_product(
 ) -> dict:
     """Создать товар."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            reqs: dict[str, str] = {}
-            if body.price is not None:
-                reqs[REQ_PRODUCT_PRICE] = str(body.price)
-            if body.weight is not None:
-                reqs[REQ_PRODUCT_WEIGHT] = str(body.weight)
-            if body.description:
-                reqs[REQ_PRODUCT_DESC] = body.description
-            if body.in_stock:
-                reqs[REQ_PRODUCT_INSTOCK] = "1"
-            if body.sku_uds:
-                reqs[REQ_PRODUCT_SKU] = body.sku_uds
-            if body.category and body.category in CATEGORY_IDS:
-                reqs[REQ_PRODUCT_CATEGORY] = CATEGORY_IDS[body.category]
-            if body.short_name:
-                reqs[REQ_PRODUCT_SHORT] = body.short_name
-            if body.stock is not None:
-                reqs[REQ_PRODUCT_STOCK] = str(body.stock)
-
-            product_id = await integram.create_object(TABLE_PRODUCTS, body.name, reqs)
+            product_id = await crm.create_product(
+                body.name,
+                price=body.price,
+                weight=body.weight,
+                description=body.description,
+                in_stock=body.in_stock,
+                sku_uds=body.sku_uds,
+                category=body.category,
+                short_name=body.short_name,
+                stock=body.stock,
+            )
             return {"ok": True, "product_id": product_id}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -930,39 +951,15 @@ async def update_product(
 ) -> dict:
     """Обновить товар."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            reqs: dict[str, str] = {}
-            if body.price is not None:
-                reqs[REQ_PRODUCT_PRICE] = str(body.price)
-            if body.weight is not None:
-                reqs[REQ_PRODUCT_WEIGHT] = str(body.weight)
-            if body.description is not None:
-                reqs[REQ_PRODUCT_DESC] = body.description
-            if body.in_stock is not None:
-                reqs[REQ_PRODUCT_INSTOCK] = "1" if body.in_stock else ""
-            if body.sku_uds is not None:
-                reqs[REQ_PRODUCT_SKU] = body.sku_uds
-            if body.category is not None:
-                cat_id = CATEGORY_IDS.get(body.category)
-                if cat_id:
-                    reqs[REQ_PRODUCT_CATEGORY] = cat_id
-            if body.short_name is not None:
-                reqs[REQ_PRODUCT_SHORT] = body.short_name
-            if body.stock is not None:
-                reqs[REQ_PRODUCT_STOCK] = str(body.stock)
-
-            if body.name is not None:
-                # Обновить имя объекта отдельно (val)
-                await integram.update_object_value(product_id, body.name)
-
-            if reqs:
-                await integram.set_requisites(product_id, TABLE_PRODUCTS, reqs)
-
+            kwargs = body.model_dump(exclude_none=True)
+            if kwargs:
+                await crm.update_product(product_id, **kwargs)
             return {"ok": True, "product_id": product_id}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -974,15 +971,13 @@ async def delete_product(
 ) -> dict:
     """Снять товар с продажи (in_stock = false)."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            await integram.set_requisites(product_id, TABLE_PRODUCTS, {
-                REQ_PRODUCT_INSTOCK: "",
-            })
+            await crm.delete_product(product_id)
             return {"ok": True, "product_id": product_id}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -995,37 +990,118 @@ async def update_product_stock(
 ) -> dict:
     """Обновить остаток товара на складе."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            await integram.set_requisites(product_id, TABLE_PRODUCTS, {
-                REQ_PRODUCT_STOCK: str(body.stock),
-            })
+            await crm.update_product_stock(product_id, body.stock)
             return {"ok": True, "product_id": product_id, "stock": body.stock}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
 
 # ---------------------------------------------------------------------------
-# Пользователи (только admin)
+# Экспорт CSV
 # ---------------------------------------------------------------------------
 
+def _to_csv(rows: list[dict], fields: list[str], headers: list[str]) -> str:
+    """Сгенерировать CSV-строку из списка словарей."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(headers)
+    for row in rows:
+        writer.writerow([row.get(f, "") for f in fields])
+    return buf.getvalue()
 
-class UserCreate(BaseModel):
-    username: str
-    password: str
-    role: str
-    display_name: str = ""
+
+@app.get("/api/export/orders", tags=["export"])
+async def export_orders_csv(
+    status: Optional[str] = None,
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> StreamingResponse:
+    """Экспорт заказов в CSV."""
+    try:
+        crm = await _get_crm()
+        try:
+            orders = await crm.get_orders(status=status)
+            rows = [_order_to_dict(o) for o in orders]
+            content = _to_csv(
+                rows,
+                fields=["number", "date", "client_name", "status", "delivery_method",
+                         "delivery_address", "items_total", "delivery_cost", "total", "source"],
+                headers=["Номер", "Дата", "Клиент", "Статус", "Доставка",
+                          "Адрес", "Сумма товаров", "Доставка ₽", "Итого", "Источник"],
+            )
+            return StreamingResponse(
+                io.BytesIO(content.encode("utf-8-sig")),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": "attachment; filename=orders.csv"},
+            )
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
 
-class UserUpdate(BaseModel):
-    password: Optional[str] = None
-    role: Optional[str] = None
-    display_name: Optional[str] = None
-    active: Optional[bool] = None
+@app.get("/api/export/clients", tags=["export"])
+async def export_clients_csv(
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> StreamingResponse:
+    """Экспорт клиентов в CSV."""
+    try:
+        crm = await _get_crm()
+        try:
+            clients = await crm.get_clients()
+            rows = [_client_to_dict(c) for c in clients]
+            content = _to_csv(
+                rows,
+                fields=["id", "name", "phone", "city", "address", "source", "telegram_username"],
+                headers=["ID", "ФИО", "Телефон", "Город", "Адрес", "Источник", "Telegram"],
+            )
+            return StreamingResponse(
+                io.BytesIO(content.encode("utf-8-sig")),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": "attachment; filename=clients.csv"},
+            )
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
 
+
+@app.get("/api/export/products", tags=["export"])
+async def export_products_csv(
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> StreamingResponse:
+    """Экспорт товаров в CSV."""
+    try:
+        crm = await _get_crm()
+        try:
+            products = await crm.get_products(in_stock_only=False)
+            rows = [_product_to_dict(p) for p in products]
+            content = _to_csv(
+                rows,
+                fields=["id", "name", "category", "price", "weight", "stock", "in_stock"],
+                headers=["ID", "Название", "Категория", "Цена", "Вес", "Остаток", "В наличии"],
+            )
+            return StreamingResponse(
+                io.BytesIO(content.encode("utf-8-sig")),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": "attachment; filename=products.csv"},
+            )
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
+
+
+# ---------------------------------------------------------------------------
+# Пользователи (только admin) — делегация в web/users.py через crm.api
+# ---------------------------------------------------------------------------
 
 @app.get("/api/users", tags=["users"])
 async def list_users(
@@ -1033,12 +1109,12 @@ async def list_users(
 ) -> list[dict[str, Any]]:
     """Список всех пользователей."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            return await get_all_users(integram)
+            return await get_all_users(crm.api)
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -1052,10 +1128,10 @@ async def create_user_endpoint(
     if body.role not in VALID_ROLES:
         raise HTTPException(400, f"Недопустимая роль: {body.role}. Допустимые: {', '.join(VALID_ROLES)}")
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
             user_id = await create_user(
-                integram,
+                crm.api,
                 username=body.username,
                 password=body.password,
                 role=body.role,
@@ -1063,10 +1139,10 @@ async def create_user_endpoint(
             )
             return {"ok": True, "user_id": user_id}
         finally:
-            await integram.close()
+            await crm.close()
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except IntegramAPIError as exc:
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -1081,10 +1157,10 @@ async def update_user_endpoint(
     if body.role is not None and body.role not in VALID_ROLES:
         raise HTTPException(400, f"Недопустимая роль: {body.role}")
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
             await update_user_service(
-                integram,
+                crm.api,
                 user_id,
                 password=body.password,
                 role=body.role,
@@ -1093,10 +1169,10 @@ async def update_user_endpoint(
             )
             return {"ok": True, "user_id": user_id}
         finally:
-            await integram.close()
+            await crm.close()
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except IntegramAPIError as exc:
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
 
@@ -1108,12 +1184,59 @@ async def delete_user_endpoint(
 ) -> dict:
     """Деактивировать пользователя."""
     try:
-        integram = await _get_integram()
+        crm = await _get_crm()
         try:
-            await delete_user_service(integram, user_id)
+            await delete_user_service(crm.api, user_id)
             return {"ok": True, "user_id": user_id}
         finally:
-            await integram.close()
-    except IntegramAPIError as exc:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
+
+
+# ---------------------------------------------------------------------------
+# SSE — серверные уведомления (Server-Sent Events)
+# ---------------------------------------------------------------------------
+
+# Очередь событий для подписчиков
+_event_subscribers: list[asyncio.Queue] = []
+
+
+async def push_event(event_type: str, data: dict) -> None:
+    """Отправить событие всем подписанным SSE-клиентам."""
+    payload = {"type": event_type, **data}
+    dead: list[asyncio.Queue] = []
+    for q in _event_subscribers:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        _event_subscribers.remove(q)
+
+
+@app.get("/api/events", tags=["events"])
+async def sse_events(
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
+):
+    """SSE-поток событий (новые заказы, смена статусов, трек-номера)."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _event_subscribers.append(queue)
+
+    async def event_stream():
+        try:
+            while True:
+                event = await queue.get()
+                yield f"data: {json_lib.dumps(event, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if queue in _event_subscribers:
+                _event_subscribers.remove(queue)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

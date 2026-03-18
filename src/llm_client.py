@@ -57,18 +57,31 @@ class LLMClient:
         self.client = Groq(**kwargs)
         self.model = GROQ_MODEL
 
-    def generate(self, query: str, context_chunks: list[dict]) -> str:
-        """Generate a response for the user's query with context."""
+    def generate(
+        self,
+        query: str,
+        context_chunks: list[dict],
+        history: list[dict] | None = None,
+    ) -> str:
+        """Generate a response for the user's query with context.
+
+        Args:
+            query: Текущий вопрос пользователя.
+            context_chunks: Чанки из базы знаний.
+            history: Список предыдущих сообщений [{role, content}, ...].
+        """
         user_prompt = build_prompt(query, context_chunks)
+
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_prompt})
 
         for attempt in range(3):
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    messages=messages,
                     max_tokens=MAX_RESPONSE_LENGTH,
                     temperature=0.4,
                 )

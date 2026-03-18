@@ -19,6 +19,8 @@ from aiogram.types import (
 )
 
 from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID
+from src.phone_utils import validate_phone, format_phone
+from src.delivery.tracker import OrderTracker
 from src.integrations.uds import UDSClient, UDSPoller
 from src.integram_client import IntegramClient
 from src import config as app_config
@@ -57,8 +59,7 @@ analyst = AnalystAgent(
     groq_model=orchestrator._model,
 )
 
-# Инициализировать админ-модуль без CRM (CRM подключается в main())
-setup_admin(bot)
+# setup_admin() вызывается в main() — один раз, после подключения CRM
 
 # Хранилище задач таймаута (user_id → asyncio.Task)
 _timeout_lock = asyncio.Lock()
@@ -606,6 +607,10 @@ async def fsm_choose_product(message: types.Message, state: FSMContext) -> None:
 
     await state.update_data(cart=cart)
 
+    # Сохранить телефон для предзаполнения на шаге 3
+    if existing_client and existing_client.phone:
+        await state.update_data(_existing_client_phone=existing_client.phone)
+
     prefill = ""
     if existing_client and existing_client.full_name:
         name = existing_client.full_name
@@ -641,9 +646,24 @@ async def fsm_enter_name(message: types.Message, state: FSMContext) -> None:
         name = data["prefill_name"]
 
     await state.update_data(full_name=name)
+
+    # Предзаполнение телефона из данных существующего клиента
+    data = await state.get_data()
+    phone_prefill = ""
+    existing_client = data.get("_existing_client_phone")
+    if existing_client:
+        phone_prefill = (
+            f"\nПодсказка: ваш прошлый номер — *{format_phone(existing_client)}*.\n"
+            "Отправьте *да* или введите другой."
+        )
+        await state.update_data(prefill_phone=existing_client)
+
     await state.set_state(OrderFSM.entering_phone)
     await _reset_timeout(message.from_user.id, message.chat.id, state)
-    await message.answer("📞 Введите ваш *номер телефона*:", parse_mode="Markdown")
+    await message.answer(
+        f"📞 Введите ваш *номер телефона*:{phone_prefill}",
+        parse_mode="Markdown",
+    )
 
 
 # ===========================================================================
@@ -654,14 +674,18 @@ async def fsm_enter_name(message: types.Message, state: FSMContext) -> None:
 @dp.message(OrderFSM.entering_phone)
 async def fsm_enter_phone(message: types.Message, state: FSMContext) -> None:
     """Обработать ввод номера телефона."""
-    phone = (message.text or "").strip()
-    # Простая валидация: минимум 7 цифр
-    digits = "".join(c for c in phone if c.isdigit())
-    if len(digits) < 7:
-        await message.answer("Введите корректный номер телефона (минимум 7 цифр).")
-        return
-
+    phone_raw = (message.text or "").strip()
     data = await state.get_data()
+
+    # Если пользователь подтвердил предзаполненный номер
+    if phone_raw.lower() in ("да", "+", "ok", "ок") and data.get("prefill_phone"):
+        phone = data["prefill_phone"]
+    else:
+        phone, error = validate_phone(phone_raw)
+        if phone is None:
+            await message.answer(error)
+            return
+
     existing_client = None
     if data.get("prefill_address") is None:
         existing_client = await logist.get_existing_client(message.from_user.id)
@@ -893,12 +917,25 @@ async def main():
             # Передать CRM-клиент всем агентам
             logist._crm = integram_client
             analyst._crm = integram_client
-            setup_admin(bot, crm=integram_client)
             logger.info("Integram CRM подключена — агенты получили доступ к данным.")
         except Exception as e:
             logger.warning("Integram CRM недоступна: %s — агенты работают без CRM.", e)
     else:
         logger.info("Integram CRM не настроена — агенты работают без CRM.")
+
+    # Инициализировать админ-модуль (один раз, с CRM если доступна)
+    setup_admin(bot, crm=integram_client)
+
+    # --- Авто-трекинг: фоновая проверка статуса отправлений ---
+    order_tracker: Optional[OrderTracker] = None
+    if integram_client:
+        from src.web.notifications import notify_client_status_change
+        order_tracker = OrderTracker(
+            crm=integram_client,
+            notify_fn=notify_client_status_change,
+        )
+        asyncio.create_task(order_tracker.run())
+        logger.info("Авто-трекинг отправлений запущен.")
 
     # --- UDS Poller: фоновая синхронизация заказов из UDS ---
     uds_poller: Optional[UDSPoller] = None
@@ -927,7 +964,9 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
-        # Graceful shutdown: остановить UDS poller и закрыть клиенты
+        # Graceful shutdown: остановить трекер, UDS poller и закрыть клиенты
+        if order_tracker:
+            order_tracker.stop()
         if uds_poller:
             uds_poller.stop()
         if uds_client:

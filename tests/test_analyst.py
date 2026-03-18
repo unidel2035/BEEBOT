@@ -64,6 +64,11 @@ def _make_order(
     )
 
 
+def _items_by_order(orders: list[Order]) -> dict[int, list[OrderItem]]:
+    """Построить items_by_order dict из заказов (для тестов)."""
+    return {o.id: o.items for o in orders if o.items}
+
+
 # ---------------------------------------------------------------------------
 # _keyword_classify
 # ---------------------------------------------------------------------------
@@ -184,26 +189,26 @@ class TestFormatOrdersReport:
 
 class TestFormatTopProductsReport:
     def test_empty_orders(self):
-        result = format_top_products_report([], "all")
+        result = format_top_products_report([], {}, "all")
         assert "нет данных" in result
 
     def test_shows_product_names(self):
         item = _make_order_item(product_name="Прополис", quantity=3)
         orders = [_make_order(items=[item])]
-        result = format_top_products_report(orders, "all")
+        result = format_top_products_report(orders, _items_by_order(orders), "all")
         assert "Прополис" in result
 
     def test_shows_quantity(self):
         item = _make_order_item(product_name="Перга", quantity=5)
         orders = [_make_order(items=[item])]
-        result = format_top_products_report(orders, "all")
+        result = format_top_products_report(orders, _items_by_order(orders), "all")
         assert "5" in result
 
     def test_sorted_by_quantity(self):
         item1 = _make_order_item(product_id=1, product_name="Мёд", quantity=1)
         item2 = _make_order_item(product_id=2, product_name="Перга", quantity=10)
         orders = [_make_order(items=[item1, item2])]
-        result = format_top_products_report(orders, "all")
+        result = format_top_products_report(orders, _items_by_order(orders), "all")
         # Перга (10 шт.) должна быть выше Мёда (1 шт.)
         assert result.index("Перга") < result.index("Мёд")
 
@@ -213,7 +218,7 @@ class TestFormatTopProductsReport:
             for i in range(1, 8)
         ]
         orders = [_make_order(items=items)]
-        result = format_top_products_report(orders, "all", top_n=3)
+        result = format_top_products_report(orders, _items_by_order(orders), "all", top_n=3)
         # Только 3 позиции должны быть в топе (плюс заголовок)
         lines = [l for l in result.split("\n") if l.strip().startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7."))]
         assert len(lines) <= 3
@@ -225,7 +230,7 @@ class TestFormatTopProductsReport:
             client_id=1,
             items=[],
         )
-        result = format_top_products_report([order], "all")
+        result = format_top_products_report([order], {}, "all")
         assert "нет позиций" in result
 
 
@@ -236,20 +241,20 @@ class TestFormatTopProductsReport:
 
 class TestFormatPackagingReport:
     def test_empty_orders(self):
-        result = format_packaging_report([], "month")
+        result = format_packaging_report([], {}, "month")
         assert "нет данных" in result
 
     def test_shows_product_name(self):
         item = _make_order_item(product_name="Пыльца", quantity=4)
         orders = [_make_order(items=[item])]
-        result = format_packaging_report(orders, "month")
+        result = format_packaging_report(orders, _items_by_order(orders), "month")
         assert "Пыльца" in result
 
     def test_sorted_by_demand(self):
         item1 = _make_order_item(product_id=1, product_name="Мёд", quantity=1)
         item2 = _make_order_item(product_id=2, product_name="Перга", quantity=10)
         orders = [_make_order(items=[item1, item2])]
-        result = format_packaging_report(orders, "month")
+        result = format_packaging_report(orders, _items_by_order(orders), "month")
         assert result.index("Перга") < result.index("Мёд")
 
 
@@ -261,12 +266,12 @@ class TestFormatPackagingReport:
 class TestFormatSummaryReport:
     def test_contains_orders_section(self):
         orders = [_make_order(1, total=500.0)]
-        result = format_summary_report(orders, "all")
+        result = format_summary_report(orders, _items_by_order(orders), "all")
         assert "Заказы" in result
 
     def test_contains_top_section(self):
         orders = [_make_order(1, total=500.0)]
-        result = format_summary_report(orders, "all")
+        result = format_summary_report(orders, _items_by_order(orders), "all")
         assert "Топ товаров" in result
 
 
@@ -302,6 +307,7 @@ class TestAnalystAgentGetSalesSummary:
         item = _make_order_item(product_name="Перга", quantity=3)
         orders = [_make_order(1, total=1500.0, items=[item])]
         mock_crm.get_orders = AsyncMock(return_value=orders)
+        mock_crm.get_order_items_bulk = AsyncMock(return_value=[item])
 
         agent = AnalystAgent(integram_client=mock_crm)
         summary = await agent.get_sales_summary("all")
@@ -326,6 +332,7 @@ class TestAnalystAgentGetSalesSummary:
         recent = _make_order(1, total=500.0, days_ago=3)
         old = _make_order(2, total=700.0, days_ago=15)
         mock_crm.get_orders = AsyncMock(return_value=[recent, old])
+        mock_crm.get_order_items_bulk = AsyncMock(return_value=[])
 
         agent = AnalystAgent(integram_client=mock_crm)
         summary = await agent.get_sales_summary("week")
@@ -347,6 +354,7 @@ class TestAnalystAgentGetPackagingRecommendations:
         item2 = _make_order_item(product_id=2, product_name="Перга", quantity=7)
         orders = [_make_order(items=[item1, item2])]
         mock_crm.get_orders = AsyncMock(return_value=orders)
+        mock_crm.get_order_items_bulk = AsyncMock(return_value=[item1, item2])
 
         agent = AnalystAgent(integram_client=mock_crm)
         recs = await agent.get_packaging_recommendations()
@@ -377,6 +385,7 @@ class TestAnalystAgentHandleQuery:
         mock_crm = MagicMock()
         item = _make_order_item(product_name="Прополис", quantity=5)
         mock_crm.get_orders = AsyncMock(return_value=[_make_order(items=[item])])
+        mock_crm.get_order_items_bulk = AsyncMock(return_value=[item])
 
         agent = AnalystAgent(
             integram_client=mock_crm,
@@ -409,6 +418,7 @@ class TestAnalystAgentHandleQuery:
         mock_crm = MagicMock()
         item = _make_order_item(product_name="Пыльца", quantity=10)
         mock_crm.get_orders = AsyncMock(return_value=[_make_order(items=[item])])
+        mock_crm.get_order_items_bulk = AsyncMock(return_value=[item])
 
         agent = AnalystAgent(integram_client=mock_crm)
         result = await agent.handle_query("Что нужно фасовать?")

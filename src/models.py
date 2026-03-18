@@ -22,6 +22,8 @@ class Product(BaseModel):
     description: Optional[str] = Field(default=None, alias="Описание")
     in_stock: Optional[bool] = Field(default=True, alias="В наличии")
     sku_uds: Optional[str] = Field(default=None, alias="Артикул UDS")
+    short_name: Optional[str] = Field(default=None, alias="Короткое название")
+    stock: Optional[float] = Field(default=None, alias="Остаток")
 
     model_config = {"populate_by_name": True}
 
@@ -71,6 +73,9 @@ class Order(BaseModel):
     total: Optional[float] = Field(default=None, alias="Итого")
     tracking_number: Optional[str] = Field(default=None, alias="Трек-номер")
     source: Optional[str] = Field(default=None, alias="Источник")
+    comment: Optional[str] = Field(default=None, alias="Комментарий")
+    messenger: Optional[str] = Field(default=None, alias="Мессенджер")
+    month: Optional[str] = Field(default=None, alias="Месяц")
     items: list[OrderItem] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}

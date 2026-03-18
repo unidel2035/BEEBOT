@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import httpx
@@ -31,6 +32,7 @@ _FALLBACK_DAYS_MAX = 14
 # Почта России: публичный API тарифов
 _TARIFF_URL = "https://tariff.pochta.ru/v2/calculate/tariff"
 _SUGGEST_URL = "https://tariff.pochta.ru/v2/suggest/postoffice"
+_TRACKING_URL = "https://tracking.pochta.ru/tracking-web-static/api/v1/tracking"
 
 # Тип отправления: 47030 = Посылка онлайн (стандарт), 27030 = Посылка нестандартная
 _MAIL_TYPE = 47030
@@ -233,4 +235,35 @@ class PochtaProvider(BaseDeliveryProvider):
         raise NotImplementedError("PochtaProvider.create_shipment не реализован")
 
     async def track_shipment(self, tracking_number: str) -> dict:
-        raise NotImplementedError("PochtaProvider.track_shipment не реализован")
+        """Получить статус отправления Почты России по трек-номеру.
+
+        Использует публичный API tracking.pochta.ru (без авторизации).
+        """
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    _TRACKING_URL,
+                    params={"barcode": tracking_number},
+                    headers={"Accept": "application/json"},
+                )
+                if resp.status_code != 200:
+                    return {"status": "Неизвестно", "description": f"Почта HTTP {resp.status_code}"}
+
+                data = resp.json()
+                operations = data.get("detailedTrackInfo", [])
+                if not operations:
+                    return {"status": "Неизвестно", "description": "Нет данных"}
+
+                latest = operations[-1]  # последняя операция — самая свежая
+                oper = latest.get("operationParameters", {})
+                address = latest.get("addressParameters", {})
+
+                return {
+                    "status": oper.get("operName", "Неизвестно"),
+                    "description": address.get("operationAddress", {}).get("description", ""),
+                    "date": oper.get("operDate", ""),
+                }
+
+        except Exception as e:
+            logger.warning("Почта tracking ошибка: %s", e)
+            return {"status": "Неизвестно", "description": str(e)}

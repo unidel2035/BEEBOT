@@ -41,22 +41,23 @@
 Цель: покрыть ключевые модули тестами, настроить CI.
 
 ### Тестирование
-- [ ] Unit-тесты для `knowledge_base.py` (поиск, keyword-буст)
-- [ ] Unit-тесты для `integram_api.py` (парсинг, маппинг)
-- [ ] Unit-тесты для агентов (beebot, logist, analyst)
-- [ ] Integration-тесты для веб-API (FastAPI TestClient)
-- [ ] E2E smoke-тест: запрос → FAISS → LLM → ответ
+- [x] Unit-тесты для `knowledge_base.py` (поиск, keyword-буст) — 16 тестов
+- [x] Unit-тесты для `integram_api.py` (парсинг, маппинг) — 24 теста
+- [x] Unit-тесты для агентов (beebot, logist, analyst) — 103 теста
+- [x] Integration-тесты для веб-API (FastAPI TestClient) — 22 теста
+- [x] E2E smoke-тест: запрос → FAISS → LLM → ответ — 7 тестов
+- **Итого: 330 тестов, все зелёные**
 
 ### CI/CD
-- [ ] GitHub Actions: lint (ruff) + тесты на каждый PR
+- [x] GitHub Actions: lint (ruff) + тесты на каждый PR
 - [ ] Автоматический деплой на VPS при мерже в main
-- [ ] Проверка .env переменных при старте (fail fast)
+- [x] Проверка .env переменных при старте (fail fast) — WEB_PASSWORD обязателен
 
 ### Код
 - [ ] Декомпозиция `OrderDetailView.vue` (507 строк → 3-4 компонента)
-- [ ] Единые Pydantic-модели для бота и веб-API
+- [x] Единые Pydantic-модели для бота и веб-API (src/models.py)
 - [ ] Объединить два CRM-клиента в один (`integram_api.py`)
-- [ ] Добавить `torch` в requirements.txt (CPU-версия)
+- ~~Добавить `torch` в requirements.txt~~ — не нужен, используется fastembed
 
 ---
 

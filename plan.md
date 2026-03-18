@@ -50,13 +50,13 @@
 
 ### CI/CD
 - [x] GitHub Actions: lint (ruff) + тесты на каждый PR
-- [ ] Автоматический деплой на VPS при мерже в main
+- [x] Автоматический деплой на VPS при мерже в main (deploy job в ci.yml, нужны GitHub Secrets)
 - [x] Проверка .env переменных при старте (fail fast) — WEB_PASSWORD обязателен
 
 ### Код
-- [ ] Декомпозиция `OrderDetailView.vue` (507 строк → 3-4 компонента)
+- [x] Декомпозиция `OrderDetailView.vue` (506→160 строк, 4 компонента)
 - [x] Единые Pydantic-модели для бота и веб-API (src/models.py)
-- [ ] Объединить два CRM-клиента в один (`integram_api.py`)
+- [x] Объединить два CRM-клиента — web/api.py переведён на IntegramClient
 - ~~Добавить `torch` в requirements.txt~~ — не нужен, используется fastembed
 
 ---

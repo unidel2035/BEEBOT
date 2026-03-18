@@ -46,8 +46,16 @@ from src.integram_api import (
     REQ_ITEM_SUM,
     REQ_ITEM_PRODUCT,
     REQ_ITEM_ORDER,
+    REQ_PRODUCT_PRICE,
+    REQ_PRODUCT_WEIGHT,
+    REQ_PRODUCT_DESC,
+    REQ_PRODUCT_INSTOCK,
+    REQ_PRODUCT_SKU,
+    REQ_PRODUCT_CATEGORY,
+    REQ_PRODUCT_SHORT,
+    REQ_PRODUCT_STOCK,
 )
-from src.crm_constants import STATUS_IDS, DELIVERY_IDS, SOURCE_IDS
+from src.crm_constants import STATUS_IDS, DELIVERY_IDS, SOURCE_IDS, CATEGORY_IDS
 from src.models import Client, Order, OrderItem, Product
 
 logger = logging.getLogger(__name__)
@@ -80,6 +88,11 @@ class IntegramClient:
     def __init__(self, **kwargs: Any) -> None:
         self._api = IntegramAPI()
         self._authenticated = False
+
+    @property
+    def api(self) -> IntegramAPI:
+        """Низкоуровневый API-клиент (для user management и прочих raw-операций)."""
+        return self._api
 
     async def authenticate(self) -> None:
         """Авторизация в Integram CRM."""
@@ -119,6 +132,8 @@ class IntegramClient:
                 description=item.get("description"),
                 in_stock=item.get("in_stock", True),
                 sku_uds=item.get("sku_uds"),
+                short_name=item.get("short_name"),
+                stock=item.get("stock"),
             )
             if in_stock_only and not product.in_stock:
                 continue
@@ -496,6 +511,89 @@ class IntegramClient:
     # Вспомогательные методы
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Товары: CRUD
+    # ------------------------------------------------------------------
+
+    async def create_product(self, name: str, **kwargs: Any) -> int:
+        """Создать товар. Возвращает ID."""
+        reqs: dict[str, str] = {}
+        if kwargs.get("price") is not None:
+            reqs[REQ_PRODUCT_PRICE] = str(kwargs["price"])
+        if kwargs.get("weight") is not None:
+            reqs[REQ_PRODUCT_WEIGHT] = str(kwargs["weight"])
+        if kwargs.get("description"):
+            reqs[REQ_PRODUCT_DESC] = kwargs["description"]
+        if kwargs.get("in_stock"):
+            reqs[REQ_PRODUCT_INSTOCK] = "1"
+        if kwargs.get("sku_uds"):
+            reqs[REQ_PRODUCT_SKU] = kwargs["sku_uds"]
+        if kwargs.get("category") and kwargs["category"] in CATEGORY_IDS:
+            reqs[REQ_PRODUCT_CATEGORY] = CATEGORY_IDS[kwargs["category"]]
+        if kwargs.get("short_name"):
+            reqs[REQ_PRODUCT_SHORT] = kwargs["short_name"]
+        if kwargs.get("stock") is not None:
+            reqs[REQ_PRODUCT_STOCK] = str(kwargs["stock"])
+        return await self._api.create_object(TABLE_PRODUCTS, name, reqs)
+
+    async def update_product(self, product_id: int, **kwargs: Any) -> None:
+        """Обновить поля товара."""
+        reqs: dict[str, str] = {}
+        if kwargs.get("price") is not None:
+            reqs[REQ_PRODUCT_PRICE] = str(kwargs["price"])
+        if kwargs.get("weight") is not None:
+            reqs[REQ_PRODUCT_WEIGHT] = str(kwargs["weight"])
+        if kwargs.get("description") is not None:
+            reqs[REQ_PRODUCT_DESC] = kwargs["description"]
+        if kwargs.get("in_stock") is not None:
+            reqs[REQ_PRODUCT_INSTOCK] = "1" if kwargs["in_stock"] else ""
+        if kwargs.get("sku_uds") is not None:
+            reqs[REQ_PRODUCT_SKU] = kwargs["sku_uds"]
+        if kwargs.get("category") is not None:
+            cat_id = CATEGORY_IDS.get(kwargs["category"])
+            if cat_id:
+                reqs[REQ_PRODUCT_CATEGORY] = cat_id
+        if kwargs.get("short_name") is not None:
+            reqs[REQ_PRODUCT_SHORT] = kwargs["short_name"]
+        if kwargs.get("stock") is not None:
+            reqs[REQ_PRODUCT_STOCK] = str(kwargs["stock"])
+        if kwargs.get("name") is not None:
+            await self._api.update_object_value(product_id, kwargs["name"])
+        if reqs:
+            await self._api.set_requisites(product_id, TABLE_PRODUCTS, reqs)
+
+    async def delete_product(self, product_id: int) -> None:
+        """Снять товар с продажи (soft delete — in_stock = false)."""
+        await self._api.set_requisites(product_id, TABLE_PRODUCTS, {
+            REQ_PRODUCT_INSTOCK: "",
+        })
+
+    async def update_product_stock(self, product_id: int, stock: int) -> None:
+        """Обновить остаток товара."""
+        await self._api.set_requisites(product_id, TABLE_PRODUCTS, {
+            REQ_PRODUCT_STOCK: str(stock),
+        })
+
+    # ------------------------------------------------------------------
+    # Дашборд и аналитика
+    # ------------------------------------------------------------------
+
+    async def get_dashboard_stats(self) -> dict[str, Any]:
+        """Статистика для дашборда."""
+        return await self._api.get_dashboard_stats()
+
+    async def get_client_telegram_id(self, client_id: int) -> Optional[int]:
+        """Получить Telegram ID клиента по ID в CRM."""
+        clients = await self.get_clients()
+        for c in clients:
+            if c.id == client_id and c.telegram_id:
+                return c.telegram_id
+        return None
+
+    # ------------------------------------------------------------------
+    # Вспомогательные методы
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _dict_to_order(item: dict) -> Order:
         """Конвертировать dict из IntegramAPI.get_orders() в Order."""
@@ -524,5 +622,8 @@ class IntegramClient:
             total=item.get("total"),
             tracking_number=item.get("tracking_number"),
             source=item.get("source"),
+            comment=item.get("comment"),
+            messenger=item.get("messenger"),
+            month=item.get("month"),
             items=[],
         )

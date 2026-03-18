@@ -262,6 +262,9 @@ class UDSClient:
             if hit_old or not new_cursor or new_cursor == cursor:
                 break
             cursor = new_cursor
+            # Пауза между страницами — UDS API имеет недокументированный
+            # rate limit, без задержки catch-up вызывает 429.
+            await asyncio.sleep(3)
 
         return txs
 

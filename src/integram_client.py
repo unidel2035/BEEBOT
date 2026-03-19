@@ -57,6 +57,7 @@ from src.integram_api import (
 )
 from src.crm_constants import STATUS_IDS, DELIVERY_IDS, SOURCE_IDS, CATEGORY_IDS
 from src.models import Client, Order, OrderItem, Product
+from src.phone_utils import normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ class IntegramClient:
         # Поиск по телефону
         phone = kwargs.get("phone")
         if phone:
+            phone = normalize_phone(phone) or phone  # нормализуем для поиска
             phone_digits = "".join(ch for ch in phone if ch.isdigit())
             for c in clients:
                 if c.phone and "".join(ch for ch in c.phone if ch.isdigit()) == phone_digits:
@@ -196,7 +198,7 @@ class IntegramClient:
         full_name = kwargs.get("full_name", f"Telegram {telegram_id}")
         reqs: dict[str, str] = {}
         if phone:
-            reqs[REQ_CLIENT_PHONE] = phone
+            reqs[REQ_CLIENT_PHONE] = phone  # уже нормализован выше
         if telegram_id:
             reqs[REQ_CLIENT_TG_ID] = str(telegram_id)
         if kwargs.get("telegram_username"):
@@ -236,7 +238,10 @@ class IntegramClient:
         reqs: dict[str, str] = {}
         for py_key, req_id in field_map.items():
             if py_key in kwargs and req_id:
-                reqs[req_id] = str(kwargs[py_key])
+                val = kwargs[py_key]
+                if py_key == "phone" and val:
+                    val = normalize_phone(str(val)) or val
+                reqs[req_id] = str(val)
         source = kwargs.get("source")
         if source and source in SOURCE_IDS:
             reqs[REQ_CLIENT_SOURCE] = SOURCE_IDS[source]

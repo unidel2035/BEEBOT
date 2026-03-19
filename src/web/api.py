@@ -5,6 +5,7 @@
   GET  /api/auth/me             — текущий пользователь (username, role)
   GET  /api/dashboard           — статистика (admin)
   GET  /api/orders              — список заказов (admin + warehouse)
+  POST /api/orders              — создать заказ (admin + warehouse)
   GET  /api/orders/{id}         — заказ по ID (admin + warehouse)
   PATCH /api/orders/{id}/status — сменить статус заказа (admin; warehouse ограничен)
   PATCH /api/orders/{id}/tracking — ввести трек-номер (admin)
@@ -58,7 +59,11 @@ from src.crm_constants import (
     ORDER_STATUSES,
     DELIVERY_METHODS,
 )
-from src.web.notifications import notify_client_status_change, notify_client_tracking
+from src.web.notifications import (
+    notify_client_status_change,
+    notify_client_tracking,
+    notify_beekeeper_status_change,
+)
 from src.web.users import (
     get_user_by_username,
     get_all_users,
@@ -87,6 +92,7 @@ if not _WEB_SECRET:
     logger.warning("WEB_SECRET не задан — сгенерирован случайный ключ (токены сбросятся при перезапуске)")
 _TOKEN_TTL = int(os.getenv("WEB_TOKEN_TTL", "60"))  # minutes
 _ALGORITHM = "HS256"
+_INTERNAL_SECRET = os.getenv("WEB_INTERNAL_SECRET", "")
 
 # ---------------------------------------------------------------------------
 # CORS
@@ -236,12 +242,23 @@ class UserUpdate(BaseModel):
     active: Optional[bool] = None
 
 
+class OrderCreate(BaseModel):
+    client_name: str
+    phone: Optional[str] = None
+    delivery_method: Optional[str] = None
+    delivery_address: Optional[str] = None
+    delivery_cost: Optional[float] = None
+    source: Optional[str] = "Сайт"
+    comment: Optional[str] = None
+    items: list[ItemCreate] = []
+
+
 # ---------------------------------------------------------------------------
 # Пагинация и поиск
 # ---------------------------------------------------------------------------
 
 _DEFAULT_PAGE_SIZE = 50
-_MAX_PAGE_SIZE = 200
+_MAX_PAGE_SIZE = 1000
 
 
 def _paginate(
@@ -545,6 +562,42 @@ async def list_orders(
         raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
+@app.post("/api/orders", tags=["orders"], status_code=201)
+async def create_order_web(
+    body: OrderCreate,
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
+) -> dict[str, Any]:
+    """Создать заказ через веб-панель."""
+    try:
+        crm = await _get_crm()
+        try:
+            # Найти или создать клиента
+            client = await crm.get_or_create_client(
+                telegram_id=0,
+                full_name=body.client_name,
+                phone=body.phone,
+                source=body.source or "Сайт",
+            )
+            items = [
+                {"product_id": i.product_id, "quantity": i.quantity, "unit_price": i.unit_price}
+                for i in body.items
+            ]
+            order = await crm.create_order(
+                client_id=client.id,
+                items=items,
+                delivery_method=body.delivery_method or "",
+                delivery_address=body.delivery_address,
+                delivery_cost=body.delivery_cost or 0,
+                source=body.source or "Сайт",
+            )
+            return _order_to_dict(order)
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram при создании заказа: %s", exc)
+        raise HTTPException(status_code=502, detail="Ошибка CRM")
+
+
 @app.get("/api/orders/{order_id}", tags=["orders"])
 async def get_order(
     order_id: int,
@@ -611,9 +664,21 @@ async def update_order_status(
             except Exception as e:
                 logger.warning("Не удалось уведомить клиента: %s", e)
 
+            # Уведомить пчеловода
+            try:
+                await notify_beekeeper_status_change(
+                    order_number=order.number if order else str(order_id),
+                    new_status=body.status,
+                    client_name=order.client_name if order and hasattr(order, "client_name") else "",
+                    tracking_number=order.tracking_number if order else None,
+                )
+            except Exception as e:
+                logger.warning("Не удалось уведомить пчеловода: %s", e)
+
             # SSE: уведомить веб-панель
             await push_event("order_status", {
                 "order_id": order_id,
+                "order_number": order.number if order else str(order_id),
                 "status": body.status,
             })
 
@@ -1218,9 +1283,25 @@ async def push_event(event_type: str, data: dict) -> None:
 
 @app.get("/api/events", tags=["events"])
 async def sse_events(
-    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
+    token: Optional[str] = None,
 ):
-    """SSE-поток событий (новые заказы, смена статусов, трек-номера)."""
+    """SSE-поток событий (новые заказы, смена статусов, трек-номера).
+
+    Принимает JWT-токен через заголовок Authorization: Bearer <token>
+    или query-параметр ?token=<token> (для EventSource в браузере).
+    """
+    # EventSource не поддерживает заголовки — принимаем токен из query param
+    if token:
+        try:
+            payload = jwt.decode(token, _WEB_SECRET, algorithms=[_ALGORITHM])
+            role = payload.get("role", "")
+            if role not in ("admin", "warehouse"):
+                raise HTTPException(status_code=403, detail="Недостаточно прав")
+        except JWTError:
+            raise HTTPException(status_code=401, detail="Неверный токен")
+    else:
+        raise HTTPException(status_code=401, detail="Токен не передан")
+
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
     _event_subscribers.append(queue)
 
@@ -1240,3 +1321,20 @@ async def sse_events(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/internal/push-event", tags=["internal"], include_in_schema=False)
+async def internal_push_event(request: Request, body: dict) -> dict:
+    """Внутренний эндпоинт: бот-контейнер → SSE-подписчики веб-панели.
+
+    Защищён заголовком X-Internal-Secret (env: WEB_INTERNAL_SECRET).
+    Если секрет не задан — эндпоинт отключён (403).
+    """
+    if not _INTERNAL_SECRET:
+        raise HTTPException(status_code=403, detail="Внутренний эндпоинт отключён")
+    secret = request.headers.get("X-Internal-Secret", "")
+    if secret != _INTERNAL_SECRET:
+        raise HTTPException(status_code=403, detail="Неверный секрет")
+    event_type = body.pop("type", "unknown")
+    await push_event(event_type, body)
+    return {"ok": True}

@@ -59,13 +59,54 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter, RouterLink, RouterView } from 'vue-router'
+import { useToast } from 'primevue/usetoast'
 import { useAuthStore } from '../stores/auth.js'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const toast = useToast()
+
+let _sse = null
+
+onMounted(() => {
+  if (!auth.token) return
+  _sse = new EventSource(`/api/events?token=${encodeURIComponent(auth.token)}`)
+  _sse.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      if (data.type === 'order_status') {
+        toast.add({
+          severity: 'info',
+          summary: 'Статус заказа изменён',
+          detail: `Заказ #${data.order_number || data.order_id} → ${data.status}`,
+          life: 6000,
+        })
+      } else if (data.type === 'order_tracking') {
+        toast.add({
+          severity: 'info',
+          summary: 'Трек-номер добавлен',
+          detail: `Заказ #${data.order_number || data.order_id}: ${data.tracking_number}`,
+          life: 6000,
+        })
+      }
+    } catch {
+      // Игнорировать невалидные события
+    }
+  }
+  _sse.onerror = () => {
+    // Браузер автоматически переподключается; ошибки не показываем
+  }
+})
+
+onUnmounted(() => {
+  if (_sse) {
+    _sse.close()
+    _sse = null
+  }
+})
 
 const allNavItems = [
   { to: '/dashboard', icon: 'pi-chart-bar', label: 'Дашборд', roles: ['admin'] },

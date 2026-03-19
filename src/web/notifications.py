@@ -15,6 +15,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+_BEEKEEPER_CHAT_ID = os.getenv("BEEKEEPER_CHAT_ID", "")
 _TG_API = "https://api.telegram.org"
 
 
@@ -92,6 +93,54 @@ async def notify_client_status_change(
                 return False
     except Exception as e:
         logger.error("Ошибка отправки уведомления: %s", e)
+        return False
+
+
+_BEEKEEPER_STATUS_MESSAGES = {
+    "Подтверждён": "✅ Заказ *#{number}* подтверждён",
+    "В сборке": "📦 Заказ *#{number}* в сборке",
+    "Отправлен": "🚚 Заказ *#{number}* отправлен{tracking}",
+    "Доставлен": "🎉 Заказ *#{number}* доставлен",
+    "Отменён": "❌ Заказ *#{number}* отменён",
+}
+
+
+async def notify_beekeeper_status_change(
+    order_number: str,
+    new_status: str,
+    client_name: str = "",
+    tracking_number: Optional[str] = None,
+) -> bool:
+    """Уведомить пчеловода о смене статуса заказа (из веб-панели)."""
+    if not _BOT_TOKEN or not _BEEKEEPER_CHAT_ID:
+        return False
+
+    template = _BEEKEEPER_STATUS_MESSAGES.get(new_status)
+    if not template:
+        return False
+
+    tracking = f"\nТрек: `{tracking_number}`" if tracking_number and new_status == "Отправлен" else ""
+    text = template.format(number=order_number, tracking=tracking)
+    if client_name:
+        text += f"\nКлиент: {client_name}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{_TG_API}/bot{_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": int(_BEEKEEPER_CHAT_ID),
+                    "text": text,
+                    "parse_mode": "Markdown",
+                },
+            )
+            if resp.status_code == 200:
+                logger.info("Уведомление пчеловоду: заказ %s → %s", order_number, new_status)
+                return True
+            logger.warning("Не удалось уведомить пчеловода: %s", resp.text)
+            return False
+    except Exception as e:
+        logger.error("Ошибка уведомления пчеловоду: %s", e)
         return False
 
 

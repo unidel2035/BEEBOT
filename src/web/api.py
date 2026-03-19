@@ -37,9 +37,11 @@ import logging
 import os
 import secrets
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -102,15 +104,46 @@ _CORS_ORIGINS_RAW = os.getenv("WEB_CORS_ORIGINS", "http://185.233.200.13:8088,ht
 _CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()]
 
 # ---------------------------------------------------------------------------
+# Telegram-алерты (используются в lifespan)
+# ---------------------------------------------------------------------------
+
+async def _telegram_alert(text: str) -> None:
+    """Отправить алерт в Telegram пчеловоду. Тихо проглатывает ошибки."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("BEEKEEPER_CHAT_ID") or os.getenv("ADMIN_CHAT_ID")
+    if not token or not chat_id:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5) as http_client:
+            await http_client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": int(chat_id), "text": text},
+            )
+    except Exception as e:
+        logger.warning("Не удалось отправить Telegram-алерт: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app + Rate limiting
 # ---------------------------------------------------------------------------
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from src.logging_config import setup_logging
+    setup_logging()
+    await _telegram_alert("🌐 Веб-панель BEEBOT запущена")
+    yield
+    await _telegram_alert("🌐 Веб-панель BEEBOT остановлена")
+
+
 app = FastAPI(
     title="BEEBOT — Веб-панель",
     description="Управление заказами «Усадьба Дмитровых»",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 app.state.limiter = limiter
@@ -1258,6 +1291,17 @@ async def delete_user_endpoint(
     except (IntegramError, IntegramAPIError) as exc:
         logger.error("Ошибка Integram: %s", exc)
         raise HTTPException(502, "Ошибка CRM")
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Healthcheck
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health", tags=["health"])
+async def health_check():
+    """Проверка работоспособности сервиса (для Docker healthcheck и мониторинга)."""
+    return {"status": "ok", "service": "beebot-web"}
 
 
 # ---------------------------------------------------------------------------

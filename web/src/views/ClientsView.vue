@@ -18,14 +18,24 @@
         <template #header>
           <div class="flex justify-between items-center p-1">
             <span class="text-base font-semibold text-gray-700">{{ clients.length }} клиентов</span>
-            <IconField>
-              <InputIcon class="pi pi-search" />
-              <InputText
-                v-model="searchQuery"
-                placeholder="Поиск по имени, телефону, городу"
-                class="w-64"
+            <div class="flex gap-2 items-center">
+              <IconField>
+                <InputIcon class="pi pi-search" />
+                <InputText
+                  v-model="searchQuery"
+                  placeholder="Поиск по имени, телефону, городу"
+                  class="w-64"
+                />
+              </IconField>
+              <Button
+                label="CSV"
+                icon="pi pi-download"
+                severity="secondary"
+                size="small"
+                :loading="exporting"
+                @click="doExport"
               />
-            </IconField>
+            </div>
           </div>
         </template>
         <template #empty>
@@ -64,9 +74,10 @@ import InputText from 'primevue/inputtext'
 import IconField from 'primevue/iconfield'
 import InputIcon from 'primevue/inputicon'
 import Tag from 'primevue/tag'
-import { getClients } from '../api.js'
+import { getClients, exportClients } from '../api.js'
 
 const loading = ref(true)
+const exporting = ref(false)
 const allClients = ref([])
 const searchQuery = ref('')
 const filters = ref({})
@@ -89,4 +100,13 @@ onMounted(async () => {
     loading.value = false
   }
 })
+
+async function doExport() {
+  exporting.value = true
+  try {
+    await exportClients()
+  } finally {
+    exporting.value = false
+  }
+}
 </script>

@@ -181,6 +181,34 @@ export async function updateStock(productId, stock) {
 }
 
 // ---------------------------------------------------------------------------
+// Export (CSV)
+// ---------------------------------------------------------------------------
+
+function _downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+export async function exportOrders(params = {}) {
+  const response = await http.get('/export/orders', { params, responseType: 'blob' })
+  _downloadBlob(response.data, 'orders.csv')
+}
+
+export async function exportClients() {
+  const response = await http.get('/export/clients', { responseType: 'blob' })
+  _downloadBlob(response.data, 'clients.csv')
+}
+
+export async function exportProducts() {
+  const response = await http.get('/export/products', { responseType: 'blob' })
+  _downloadBlob(response.data, 'products.csv')
+}
+
+// ---------------------------------------------------------------------------
 // Users (Пользователи)
 // ---------------------------------------------------------------------------
 

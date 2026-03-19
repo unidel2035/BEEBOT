@@ -2,7 +2,17 @@
   <div>
     <div class="flex items-center justify-between mb-6">
       <h2 class="text-2xl font-bold text-gray-800">Товары</h2>
-      <Button label="Добавить товар" icon="pi pi-plus" size="small" @click="openCreateDialog" />
+      <div class="flex gap-2">
+        <Button
+          label="CSV"
+          icon="pi pi-download"
+          severity="secondary"
+          size="small"
+          :loading="exporting"
+          @click="doExport"
+        />
+        <Button label="Добавить товар" icon="pi pi-plus" size="small" @click="openCreateDialog" />
+      </div>
     </div>
 
     <!-- Таблица товаров -->
@@ -145,12 +155,13 @@ import Select from 'primevue/select'
 import Checkbox from 'primevue/checkbox'
 import ToggleButton from 'primevue/togglebutton'
 import Tag from 'primevue/tag'
-import { getProducts, createProduct, updateProduct, deleteProduct } from '../api.js'
+import { getProducts, createProduct, updateProduct, deleteProduct, exportProducts } from '../api.js'
 import { formatMoney } from '../utils.js'
 
 const toast = useToast()
 const confirm = useConfirm()
 const loading = ref(true)
+const exporting = ref(false)
 const products = ref([])
 const showAll = ref(true)
 
@@ -166,6 +177,15 @@ function emptyForm() {
 }
 
 onMounted(() => loadProducts())
+
+async function doExport() {
+  exporting.value = true
+  try {
+    await exportProducts()
+  } finally {
+    exporting.value = false
+  }
+}
 
 async function loadProducts() {
   loading.value = true

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime
 from typing import Any
@@ -411,3 +412,252 @@ class TestProducts:
             resp = client.delete("/api/products/1", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Тесты: Пагинация
+# ---------------------------------------------------------------------------
+
+class TestPagination:
+    def test_orders_pagination_structure(self, auth_headers):
+        orders = [_make_order(id=i) for i in range(1, 6)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/orders", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "items" in data
+        assert "total" in data
+        assert "page" in data
+        assert "per_page" in data
+        assert "pages" in data
+        assert data["total"] == 5
+
+    def test_orders_pagination_page2(self, auth_headers):
+        orders = [_make_order(id=i) for i in range(1, 6)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/orders?page=2&per_page=2", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["page"] == 2
+        assert data["per_page"] == 2
+        assert len(data["items"]) == 2
+        assert data["total"] == 5
+        assert data["pages"] == 3
+
+    def test_orders_pagination_last_page(self, auth_headers):
+        orders = [_make_order(id=i) for i in range(1, 6)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/orders?page=3&per_page=2", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 1
+
+    def test_clients_pagination_structure(self, auth_headers):
+        clients_list = [_make_client(id=i) for i in range(1, 4)]
+        with _mock_crm(clients=clients_list):
+            resp = client.get("/api/clients", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "items" in data
+        assert data["total"] == 3
+
+    def test_clients_per_page(self, auth_headers):
+        clients_list = [_make_client(id=i) for i in range(1, 4)]
+        with _mock_crm(clients=clients_list):
+            resp = client.get("/api/clients?per_page=1&page=1", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 1
+        assert data["total"] == 3
+
+    def test_products_pagination_structure(self, auth_headers):
+        products = [_make_product(id=i, name=f"Товар {i}") for i in range(1, 4)]
+        with _mock_crm(products=products):
+            resp = client.get("/api/products", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "items" in data
+        assert data["total"] == 3
+
+    def test_per_page_capped_at_max(self, auth_headers):
+        orders = [_make_order(id=1)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/orders?per_page=9999", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["per_page"] == 1000
+
+    def test_empty_list_returns_one_page(self, auth_headers):
+        with _mock_crm(orders=[]):
+            resp = client.get("/api/orders", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["pages"] == 1
+        assert data["items"] == []
+
+
+# ---------------------------------------------------------------------------
+# Тесты: Поиск
+# ---------------------------------------------------------------------------
+
+class TestSearch:
+    def test_orders_search_by_number(self, auth_headers):
+        orders = [_make_order(id=1), _make_order(id=2)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/orders?search=ORD-0001", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["number"] == "ORD-0001"
+
+    def test_orders_search_no_results(self, auth_headers):
+        orders = [_make_order(id=1)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/orders?search=NONEXISTENT", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["items"] == []
+
+    def test_orders_search_by_client_name(self, auth_headers):
+        orders = [_make_order(id=1), _make_order(id=2)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/orders?search=Иванов", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 2
+
+    def test_clients_search_by_name(self, auth_headers):
+        clients_list = [_make_client(id=1), _make_client(id=2)]
+        with _mock_crm(clients=clients_list):
+            resp = client.get("/api/clients?search=Иванов", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 2
+
+    def test_clients_search_no_results(self, auth_headers):
+        clients_list = [_make_client(id=1)]
+        with _mock_crm(clients=clients_list):
+            resp = client.get("/api/clients?search=Петров", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 0
+
+    def test_products_search_by_name(self, auth_headers):
+        products = [_make_product(id=1, name="Перга"), _make_product(id=2, name="Прополис")]
+        with _mock_crm(products=products):
+            resp = client.get("/api/products?search=Перга", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["name"] == "Перга"
+
+    def test_search_case_insensitive(self, auth_headers):
+        products = [_make_product(id=1, name="Перга")]
+        with _mock_crm(products=products):
+            resp = client.get("/api/products?search=перга", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Тесты: CSV-экспорт
+# ---------------------------------------------------------------------------
+
+class TestExport:
+    def test_export_orders_returns_csv(self, auth_headers):
+        orders = [_make_order(id=1)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/export/orders", headers=auth_headers)
+        assert resp.status_code == 200
+        assert "text/csv" in resp.headers["content-type"]
+        assert "attachment" in resp.headers["content-disposition"]
+        assert "orders.csv" in resp.headers["content-disposition"]
+
+    def test_export_orders_contains_header_row(self, auth_headers):
+        orders = [_make_order(id=1)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/export/orders", headers=auth_headers)
+        assert resp.status_code == 200
+        text = resp.content.decode("utf-8-sig")
+        assert "Номер" in text
+        assert "Клиент" in text
+        assert "Статус" in text
+
+    def test_export_orders_contains_data(self, auth_headers):
+        orders = [_make_order(id=1)]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/export/orders", headers=auth_headers)
+        text = resp.content.decode("utf-8-sig")
+        assert "ORD-0001" in text
+        assert "Иван Иванов" in text
+
+    def test_export_orders_with_status_filter(self, auth_headers):
+        orders = [_make_order(id=1, status="Доставлен")]
+        with _mock_crm(orders=orders):
+            resp = client.get("/api/export/orders?status=Доставлен", headers=auth_headers)
+        assert resp.status_code == 200
+
+    def test_export_clients_returns_csv(self, auth_headers):
+        clients_list = [_make_client(id=1)]
+        with _mock_crm(clients=clients_list):
+            resp = client.get("/api/export/clients", headers=auth_headers)
+        assert resp.status_code == 200
+        assert "text/csv" in resp.headers["content-type"]
+        assert "clients.csv" in resp.headers["content-disposition"]
+
+    def test_export_clients_contains_data(self, auth_headers):
+        clients_list = [_make_client(id=1)]
+        with _mock_crm(clients=clients_list):
+            resp = client.get("/api/export/clients", headers=auth_headers)
+        text = resp.content.decode("utf-8-sig")
+        assert "ФИО" in text
+        assert "Иван Иванов" in text
+
+    def test_export_products_returns_csv(self, auth_headers):
+        products = [_make_product(id=1)]
+        with _mock_crm(products=products):
+            resp = client.get("/api/export/products", headers=auth_headers)
+        assert resp.status_code == 200
+        assert "text/csv" in resp.headers["content-type"]
+        assert "products.csv" in resp.headers["content-disposition"]
+
+    def test_export_products_contains_data(self, auth_headers):
+        products = [_make_product(id=1, name="Перга")]
+        with _mock_crm(products=products):
+            resp = client.get("/api/export/products", headers=auth_headers)
+        text = resp.content.decode("utf-8-sig")
+        assert "Название" in text
+        assert "Перга" in text
+
+    def test_export_requires_auth(self):
+        resp = client.get("/api/export/orders")
+        assert resp.status_code == 401
+
+    def test_export_clients_requires_auth(self):
+        resp = client.get("/api/export/clients")
+        assert resp.status_code == 401
+
+    def test_export_products_requires_auth(self):
+        resp = client.get("/api/export/products")
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Тесты: SSE-эндпоинт
+# ---------------------------------------------------------------------------
+
+class TestSSE:
+    def test_sse_without_token_returns_401(self):
+        resp = client.get("/api/events")
+        assert resp.status_code == 401
+
+    def test_sse_with_invalid_token_returns_401(self):
+        resp = client.get("/api/events?token=invalid.token.here")
+        assert resp.status_code == 401
+
+    def test_sse_with_valid_token_returns_event_stream(self, auth_headers):
+        token = auth_headers["Authorization"].split(" ")[1]
+        # Патчим queue.get() → CancelledError, чтобы генератор сразу завершился
+        # и ASGI TestClient не завис на бесконечном стриме
+        with patch("asyncio.Queue.get", new=AsyncMock(side_effect=asyncio.CancelledError())):
+            resp = client.get(f"/api/events?token={token}")
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]

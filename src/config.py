@@ -55,6 +55,10 @@ POCHTA_TOKEN = os.getenv("POCHTA_TOKEN")
 POCHTA_KEY = os.getenv("POCHTA_KEY")
 SENDER_CITY = os.getenv("SENDER_CITY", "Москва")
 
+# YouTube Data API (опционально — для автообновления KB)
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+YOUTUBE_CHANNEL_HANDLE = os.getenv("YOUTUBE_CHANNEL_HANDLE", "@a.dmitrov")
+
 # Bot settings
 MAX_CONTEXT_CHUNKS = int(os.getenv("MAX_CONTEXT_CHUNKS", "5"))
 MAX_RESPONSE_LENGTH = int(os.getenv("MAX_RESPONSE_LENGTH", "4096"))

@@ -12,15 +12,17 @@ Intents:
     greeting → быстрый ответ без LLM
 """
 
+import json
 import logging
 import time
+from collections import Counter
 from typing import Literal
 
 from groq import Groq
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 
-from src.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL
+from src.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, PROCESSED_DIR
 from src.agents.beebot import BeebotAgent
 from src.agents.logist import LogistAgent
 from src.agents.analyst import AnalystAgent
@@ -39,6 +41,10 @@ Intent = Literal["consult", "order", "edit", "track", "stats", "greeting"]
 
 _DIALOG_TTL_SECONDS = 30 * 60  # 30 minutes
 _MAX_HISTORY = 5  # максимум пар сообщений в истории
+
+# FAQ: путь к файлу с накопленными запросами
+_FAQ_PATH = PROCESSED_DIR / "faq_queries.json"
+_FAQ_SAVE_EVERY = 50  # сохранять на диск каждые N новых запросов
 
 
 class DialogState(TypedDict):
@@ -188,6 +194,11 @@ class Orchestrator:
         # Conversation history per user_id (last N messages)
         self._histories: dict[int, list[_ConversationMessage]] = {}
 
+        # FAQ: счётчик пользовательских consult-запросов
+        self._query_counter: Counter = Counter()
+        self._query_counter_since_save: int = 0
+        self._load_faq_queries()
+
         self._graph = self._build_graph()
 
     # ------------------------------------------------------------------
@@ -236,9 +247,10 @@ class Orchestrator:
             updated_at=time.monotonic(),
         )
 
-        # Сохранить в историю (только для consult — чтобы не засорять чатом с FSM)
+        # Сохранить в историю + FAQ-счётчик (только для consult)
         if result["intent"] == "consult" and result["response"]:
             self._append_history(user_id, query, result["response"])
+            self._track_query(query)
 
         return result["response"], result["chunks"]
 
@@ -376,3 +388,48 @@ class Orchestrator:
         for uid in stale:
             del self._dialog_states[uid]
             self._histories.pop(uid, None)
+
+    # ------------------------------------------------------------------
+    # FAQ: сбор частых запросов
+    # ------------------------------------------------------------------
+
+    def _load_faq_queries(self) -> None:
+        """Загрузить накопленные запросы с диска при старте."""
+        try:
+            if _FAQ_PATH.exists():
+                with open(_FAQ_PATH, encoding="utf-8") as f:
+                    data = json.load(f)
+                self._query_counter = Counter(data)
+                logger.info("FAQ: загружено %d уникальных запросов", len(self._query_counter))
+        except Exception as e:
+            logger.warning("FAQ: не удалось загрузить запросы: %s", e)
+
+    def _save_faq_queries(self) -> None:
+        """Сохранить счётчик запросов на диск."""
+        try:
+            _FAQ_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(_FAQ_PATH, "w", encoding="utf-8") as f:
+                json.dump(dict(self._query_counter), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning("FAQ: не удалось сохранить запросы: %s", e)
+
+    def _track_query(self, query: str) -> None:
+        """Зарегистрировать запрос в FAQ-счётчике."""
+        # Нормализуем: нижний регистр, обрезаем пробелы
+        key = query.lower().strip()
+        if len(key) < 5 or len(key) > 200:
+            return
+        self._query_counter[key] += 1
+        self._query_counter_since_save += 1
+        if self._query_counter_since_save >= _FAQ_SAVE_EVERY:
+            self._save_faq_queries()
+            self._query_counter_since_save = 0
+
+    def get_top_queries(self, n: int = 20) -> list[tuple[str, int]]:
+        """Вернуть топ-N самых частых запросов."""
+        return self._query_counter.most_common(n)
+
+    def flush_faq(self) -> None:
+        """Принудительно сохранить FAQ на диск."""
+        self._save_faq_queries()
+        self._query_counter_since_save = 0

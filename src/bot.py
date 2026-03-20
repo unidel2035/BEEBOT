@@ -957,7 +957,7 @@ async def _alert(text: str) -> None:
 
 
 @dp.startup()
-async def on_startup(_: Bot) -> None:
+async def on_startup(**_kwargs) -> None:
     """Отправить алерт о старте после установки соединения с Telegram."""
     await _alert("🟢 BEEBOT запущен")
 

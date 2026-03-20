@@ -71,6 +71,7 @@ class OrchestratorState(TypedDict):
     response: str        # final response text
     chunks: list[dict]   # knowledge base chunks (from BEEBOT)
     history: list[dict]  # conversation history for LLM
+    style: str | None    # «Голос Улья» — стиль ответа
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +198,12 @@ class Orchestrator:
         """Загрузить базу знаний BEEBOT (вызывается при старте бота)."""
         self._beebot.kb.load()
 
-    async def route(self, user_id: int, query: str) -> tuple[str, list[dict]]:
+    async def route(
+        self,
+        user_id: int,
+        query: str,
+        style: str | None = None,
+    ) -> tuple[str, list[dict]]:
         """Маршрутизировать запрос к нужному агенту.
 
         Returns:
@@ -215,6 +221,7 @@ class Orchestrator:
             "response": "",
             "chunks": [],
             "history": history,
+            "style": style,
         }
 
         result = await self._graph.ainvoke(initial_state)
@@ -303,6 +310,7 @@ class Orchestrator:
         response, chunks = self._beebot.answer(
             state["query"],
             history=state.get("history"),
+            style=state.get("style"),
         )
         return {**state, "response": response, "chunks": chunks}
 

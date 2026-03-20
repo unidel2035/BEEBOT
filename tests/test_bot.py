@@ -173,7 +173,7 @@ class TestHandleQuestion:
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg, state)
 
-        mock_orchestrator.route.assert_called_once_with(msg.from_user.id, "Как принимать прополис?")
+        mock_orchestrator.route.assert_called_once_with(msg.from_user.id, "Как принимать прополис?", style=None)
 
     @pytest.mark.asyncio
     async def test_calls_llm_generate_with_chunks(self):
@@ -194,7 +194,7 @@ class TestHandleQuestion:
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg, state)
 
-        mock_orchestrator.route.assert_called_once_with(msg.from_user.id, "Вопрос о прополисе")
+        mock_orchestrator.route.assert_called_once_with(msg.from_user.id, "Вопрос о прополисе", style=None)
 
     @pytest.mark.asyncio
     async def test_replies_with_llm_response(self):

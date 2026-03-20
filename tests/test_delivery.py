@@ -113,10 +113,12 @@ class TestCDEKProvider:
             await provider.create_shipment({"delivery_method": "СДЭК"})
 
     @pytest.mark.asyncio
-    async def test_track_shipment_not_implemented(self):
+    async def test_track_shipment_returns_dict(self):
+        """track_shipment реализован и возвращает dict (с fallback при отсутствии токена)."""
         provider = CDEKProvider()
-        with pytest.raises(NotImplementedError):
-            await provider.track_shipment("CDEK-123456")
+        result = await provider.track_shipment("CDEK-123456")
+        assert isinstance(result, dict)
+        assert "status" in result
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +156,12 @@ class TestPochtaProvider:
             await provider.create_shipment({"delivery_method": "Почта России"})
 
     @pytest.mark.asyncio
-    async def test_track_shipment_not_implemented(self):
+    async def test_track_shipment_returns_dict(self):
+        """track_shipment реализован и возвращает dict (с fallback при ошибке API)."""
         provider = PochtaProvider()
-        with pytest.raises(NotImplementedError):
-            await provider.track_shipment("80123456789RU")
+        result = await provider.track_shipment("80123456789RU")
+        assert isinstance(result, dict)
+        assert "status" in result
 
 
 # ---------------------------------------------------------------------------
@@ -368,13 +372,15 @@ class TestDeliveryCalculatorRealProviders:
             await calc.create_shipment({"delivery_method": "Почта России"})
 
     @pytest.mark.asyncio
-    async def test_cdek_track_raises_not_implemented(self):
+    async def test_cdek_track_returns_status(self):
         calc = DeliveryCalculator()
-        with pytest.raises(NotImplementedError):
-            await calc.track("CDEK-001", provider_name="СДЭК")
+        result = await calc.track("CDEK-001", provider_name="СДЭК")
+        assert isinstance(result, TrackingStatus)
+        assert result.status
 
     @pytest.mark.asyncio
-    async def test_pochta_track_raises_not_implemented(self):
+    async def test_pochta_track_returns_status(self):
         calc = DeliveryCalculator()
-        with pytest.raises(NotImplementedError):
-            await calc.track("80123456789RU", provider_name="Почта России")
+        result = await calc.track("80123456789RU", provider_name="Почта России")
+        assert isinstance(result, TrackingStatus)
+        assert result.status

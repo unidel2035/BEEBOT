@@ -35,6 +35,14 @@
         size="small"
         @click="resetFilters"
       />
+      <Button
+        label="CSV"
+        icon="pi pi-download"
+        severity="secondary"
+        size="small"
+        :loading="exporting"
+        @click="doExport"
+      />
     </div>
 
     <!-- Таблица заказов -->
@@ -99,11 +107,12 @@ import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Button from 'primevue/button'
 import Select from 'primevue/select'
-import { getOrders, getReference } from '../api.js'
+import { getOrders, getReference, exportOrders } from '../api.js'
 import StatusBadge from '../components/StatusBadge.vue'
 import { formatDate, formatMoney } from '../utils.js'
 
 const loading = ref(true)
+const exporting = ref(false)
 const orders = ref([])
 const filterStatus = ref('')
 const filterSource = ref('')
@@ -133,5 +142,16 @@ function resetFilters() {
   filterStatus.value = ''
   filterSource.value = ''
   loadOrders()
+}
+
+async function doExport() {
+  exporting.value = true
+  try {
+    const params = {}
+    if (filterStatus.value) params.status = filterStatus.value
+    await exportOrders(params)
+  } finally {
+    exporting.value = false
+  }
 }
 </script>

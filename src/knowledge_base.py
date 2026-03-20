@@ -169,8 +169,7 @@ class KnowledgeBase:
             json.dump(self.chunks, f, ensure_ascii=False, indent=2)
 
     def load(self):
-        """Load existing index and chunks from disk."""
-        self._load_model()
+        """Load FAISS index and chunks from disk. Model is loaded lazily on first search."""
         self.index = faiss.read_index(str(FAISS_INDEX_PATH))
         with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
             self.chunks = json.load(f)
@@ -214,6 +213,8 @@ class KnowledgeBase:
         """Search for the most relevant chunks given a query."""
         if self.index is None:
             self.load()
+
+        self._load_model()  # Lazy — загружается один раз при первом поиске
 
         top_k = top_k or MAX_CONTEXT_CHUNKS
 

@@ -39,11 +39,8 @@ from src.agents.logist import (
 from src.orchestrator import Orchestrator
 from src.agents.analyst import AnalystAgent
 from src.admin import router as admin_router, setup_admin
+from src.logging_config import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -899,7 +896,18 @@ async def send_instruction_pdf(callback: types.CallbackQuery):
     )
 
 
+async def _alert(text: str) -> None:
+    """Отправить алерт пчеловоду. Тихо проглатывает ошибки."""
+    if not BEEKEEPER_CHAT_ID:
+        return
+    try:
+        await bot.send_message(BEEKEEPER_CHAT_ID, text)
+    except Exception as e:
+        logger.warning("Не удалось отправить Telegram-алерт: %s", e)
+
+
 async def main():
+    setup_logging()
     logger.info("Starting BEEBOT...")
     try:
         orchestrator.load_kb()
@@ -961,9 +969,18 @@ async def main():
         logger.info("UDS не настроен (UDS_API_KEY/UDS_COMPANY_ID не заданы) — поллер пропущен.")
 
     logger.info("Bot is running!")
+    await _alert("🟢 BEEBOT запущен")
+    _crashed = False
     try:
         await dp.start_polling(bot)
+    except Exception as exc:
+        _crashed = True
+        logger.exception("Критическая ошибка бота: %s", exc)
+        await _alert(f"❌ BEEBOT упал: {exc}")
+        raise
     finally:
+        if not _crashed:
+            await _alert("🔴 BEEBOT остановлен")
         # Graceful shutdown: остановить трекер, UDS poller и закрыть клиенты
         if order_tracker:
             order_tracker.stop()

@@ -14,11 +14,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
+
+import httpx
 
 from src.delivery.calculator import DeliveryCalculator
 
 logger = logging.getLogger(__name__)
+
+_WEB_INTERNAL_URL = os.getenv("WEB_INTERNAL_URL", "http://localhost:8080")
+_WEB_INTERNAL_SECRET = os.getenv("WEB_INTERNAL_SECRET", "")
+
+
+async def _push_web_sse(event_type: str, **data) -> None:
+    """Отправить SSE-событие в веб-панель через внутренний эндпоинт."""
+    if not _WEB_INTERNAL_SECRET:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post(
+                f"{_WEB_INTERNAL_URL}/api/internal/push-event",
+                json={"type": event_type, **data},
+                headers={"X-Internal-Secret": _WEB_INTERNAL_SECRET},
+            )
+    except Exception as exc:
+        logger.debug("SSE push в веб-панель не удался: %s", exc)
 
 # Интервал проверки: 2 часа
 CHECK_INTERVAL = 2 * 60 * 60
@@ -115,3 +136,11 @@ class OrderTracker:
                         await self._notify_fn(tg_id, order.number, "Доставлен")
                 except Exception as e:
                     logger.warning("Не удалось уведомить клиента о доставке заказа #%s: %s", order.number, e)
+
+            # SSE: уведомить веб-панель
+            await _push_web_sse(
+                "order_status",
+                order_id=order.id,
+                order_number=order.number,
+                status="Доставлен",
+            )

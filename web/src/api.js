@@ -76,8 +76,8 @@ export async function getReference() {
 // ---------------------------------------------------------------------------
 
 export async function getOrders(params = {}) {
-  const { data } = await http.get('/orders', { params })
-  return data
+  const { data } = await http.get('/orders', { params: { per_page: 1000, ...params } })
+  return data.items ?? data
 }
 
 export async function getOrder(id) {
@@ -136,8 +136,8 @@ export async function deleteOrderItem(orderId, itemId) {
 // ---------------------------------------------------------------------------
 
 export async function getClients() {
-  const { data } = await http.get('/clients')
-  return data
+  const { data } = await http.get('/clients', { params: { per_page: 1000 } })
+  return data.items ?? data
 }
 
 export async function getClient(id) {
@@ -151,9 +151,9 @@ export async function getClient(id) {
 
 export async function getProducts(inStockOnly = false) {
   const { data } = await http.get('/products', {
-    params: inStockOnly ? { in_stock_only: true } : {}
+    params: { per_page: 1000, ...(inStockOnly ? { in_stock_only: true } : {}) }
   })
-  return data
+  return data.items ?? data
 }
 
 export async function createProduct(body) {
@@ -178,6 +178,34 @@ export async function deleteProduct(id) {
 export async function updateStock(productId, stock) {
   const { data } = await http.patch(`/products/${productId}/stock`, { stock })
   return data
+}
+
+// ---------------------------------------------------------------------------
+// Export (CSV)
+// ---------------------------------------------------------------------------
+
+function _downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+export async function exportOrders(params = {}) {
+  const response = await http.get('/export/orders', { params, responseType: 'blob' })
+  _downloadBlob(response.data, 'orders.csv')
+}
+
+export async function exportClients() {
+  const response = await http.get('/export/clients', { responseType: 'blob' })
+  _downloadBlob(response.data, 'clients.csv')
+}
+
+export async function exportProducts() {
+  const response = await http.get('/export/products', { responseType: 'blob' })
+  _downloadBlob(response.data, 'products.csv')
 }
 
 // ---------------------------------------------------------------------------

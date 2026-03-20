@@ -36,6 +36,11 @@ from src.agents.logist import (
     ORDER_TIMEOUT_SECONDS,
     format_order_summary,
 )
+from src.agents.inspector import (
+    InspectorAgent,
+    InspectFSM,
+    INSPECT_TIMEOUT_SECONDS,
+)
 from src.orchestrator import Orchestrator
 from src.agents.analyst import AnalystAgent
 from src.admin import router as admin_router, setup_admin
@@ -59,6 +64,7 @@ analyst = AnalystAgent(
     groq_client=orchestrator._groq,
     groq_model=orchestrator._model,
 )
+inspector = InspectorAgent()  # KB будет подключена в main() после load_kb()
 
 # setup_admin() вызывается в main() — один раз, после подключения CRM
 
@@ -94,6 +100,7 @@ HELP_MESSAGE = """Как пользоваться ботом:
 /products — список продуктов с инструкциями
 /order — оформить заказ
 /voice — сменить стиль ответов (Голос Улья)
+/inspect — персональная консультация (Осмотр улья)
 /stats [запрос] — аналитика продаж (админ)
 /orders [статус] — список заказов (админ)
 /order <ID> — детали заказа (админ)
@@ -229,6 +236,141 @@ async def cb_voice_style(callback: types.CallbackQuery):
         f"_{sdata['desc']}_\n\n"
         "Задай любой вопрос — отвечу в этом стиле.",
         parse_mode="Markdown",
+    )
+
+
+# ===========================================================================
+# «Осмотр улья» — диагностический квест
+# ===========================================================================
+
+def _inspect_skip_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка для пропуска оставшихся вопросов."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="💡 Получить рекомендацию", callback_data="inspect_finish"),
+    ]])
+
+
+@dp.message(Command("inspect"))
+async def cmd_inspect(message: types.Message, state: FSMContext):
+    """Запустить диагностический диалог «Осмотр улья»."""
+    current_state = await state.get_state()
+    if current_state and current_state.startswith("OrderFSM"):
+        await message.answer("Сначала заверши или отмени текущий заказ (/cancel).")
+        return
+
+    await state.set_state(InspectFSM.describing_issue)
+    await state.update_data(inspect_collected=[])
+    await message.answer(
+        "🐝 *Осмотр улья* — персональная консультация\n\n"
+        "Опиши, что тебя беспокоит или чего хочешь достичь. "
+        "Я задам пару уточняющих вопросов и дам точную рекомендацию.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отменить", callback_data="inspect_cancel"),
+        ]]),
+    )
+
+
+@dp.message(InspectFSM.describing_issue)
+async def inspect_got_issue(message: types.Message, state: FSMContext):
+    """Получить описание проблемы → задать 1-й уточняющий вопрос."""
+    issue = (message.text or "").strip()
+    if len(issue) < 5:
+        await message.answer("Расскажи подробнее — хотя бы несколько слов.")
+        return
+
+    collected = [issue]
+    await state.update_data(inspect_collected=collected)
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    question = inspector.generate_question(collected)
+    await state.set_state(InspectFSM.answering_q1)
+    await message.answer(question, reply_markup=_inspect_skip_keyboard())
+
+
+@dp.message(InspectFSM.answering_q1)
+async def inspect_got_q1(message: types.Message, state: FSMContext):
+    """Получить ответ на 1-й вопрос → задать 2-й или завершить."""
+    answer = (message.text or "").strip()
+    data = await state.get_data()
+    collected: list[str] = data.get("inspect_collected", [])
+    collected.append(answer)
+    await state.update_data(inspect_collected=collected)
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    question = inspector.generate_question(collected)
+    await state.set_state(InspectFSM.answering_q2)
+    await message.answer(question, reply_markup=_inspect_skip_keyboard())
+
+
+@dp.message(InspectFSM.answering_q2)
+async def inspect_got_q2(message: types.Message, state: FSMContext):
+    """Получить ответ на 2-й вопрос → выдать рекомендацию."""
+    answer = (message.text or "").strip()
+    data = await state.get_data()
+    collected: list[str] = data.get("inspect_collected", [])
+    collected.append(answer)
+    await state.clear()
+
+    await bot.send_chat_action(message.chat.id, "typing")
+    style = _user_styles.get(message.from_user.id)
+    recommendation = inspector.generate_recommendation(collected, style=style)
+    await message.answer(
+        f"🍯 *Рекомендация*\n\n{recommendation}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Новый осмотр", callback_data="inspect_restart"),
+            InlineKeyboardButton(text="📦 Все продукты", callback_data="show_products"),
+        ]]),
+    )
+
+
+@dp.callback_query(F.data == "inspect_finish")
+async def inspect_cb_finish(callback: types.CallbackQuery, state: FSMContext):
+    """Досрочно завершить диалог и получить рекомендацию."""
+    data = await state.get_data()
+    collected: list[str] = data.get("inspect_collected", [])
+    await state.clear()
+
+    if not collected:
+        await callback.answer("Сначала опиши проблему.", show_alert=True)
+        return
+
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await bot.send_chat_action(callback.message.chat.id, "typing")
+    style = _user_styles.get(callback.from_user.id)
+    recommendation = inspector.generate_recommendation(collected, style=style)
+    await callback.message.answer(
+        f"🍯 *Рекомендация*\n\n{recommendation}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Новый осмотр", callback_data="inspect_restart"),
+            InlineKeyboardButton(text="📦 Все продукты", callback_data="show_products"),
+        ]]),
+    )
+
+
+@dp.callback_query(F.data == "inspect_cancel")
+async def inspect_cb_cancel(callback: types.CallbackQuery, state: FSMContext):
+    """Отменить диагностику."""
+    await state.clear()
+    await callback.answer("Осмотр отменён.")
+    await callback.message.edit_text("Осмотр отменён. Задай вопрос в любое время.")
+
+
+@dp.callback_query(F.data == "inspect_restart")
+async def inspect_cb_restart(callback: types.CallbackQuery, state: FSMContext):
+    """Начать осмотр заново."""
+    await callback.answer()
+    await state.set_state(InspectFSM.describing_issue)
+    await state.update_data(inspect_collected=[])
+    await callback.message.answer(
+        "🐝 *Новый осмотр*\n\nОпиши, что тебя беспокоит.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отменить", callback_data="inspect_cancel"),
+        ]]),
     )
 
 
@@ -967,6 +1109,7 @@ async def main():
     logger.info("Starting BEEBOT...")
     try:
         orchestrator.load_kb()
+        inspector.kb = orchestrator._beebot.kb  # разделяем KB с beebot
         logger.info(f"Knowledge base loaded: {len(orchestrator._beebot.kb.chunks)} chunks")
     except FileNotFoundError:
         logger.error("Knowledge base not found! Run `python -m src.build_kb` first.")

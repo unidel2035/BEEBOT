@@ -101,6 +101,9 @@ HELP_MESSAGE = """Как пользоваться ботом:
 /order — оформить заказ
 /voice — сменить стиль ответов (Голос Улья)
 /inspect — персональная консультация (Осмотр улья)
+/faq — топ частых вопросов (админ)
+/yt_check — проверить новые видео на канале (админ)
+/yt_update — обновить базу знаний из YouTube (админ)
 /stats [запрос] — аналитика продаж (админ)
 /orders [статус] — список заказов (админ)
 /order <ID> — детали заказа (админ)
@@ -393,6 +396,119 @@ async def cmd_stats(message: types.Message):
     except Exception as e:
         logger.error("Ошибка аналитики: %s", e)
         await message.answer("Не удалось получить статистику. Попробуйте позже.")
+
+
+# ===========================================================================
+# YouTube updater — /yt_check, /yt_update  (только ADMIN_CHAT_ID)
+# ===========================================================================
+
+@dp.message(Command("yt_check"))
+async def cmd_yt_check(message: types.Message):
+    """Проверить новые видео на YouTube-канале."""
+    if ADMIN_CHAT_ID is None or message.from_user.id != ADMIN_CHAT_ID:
+        await message.answer("⛔ Команда доступна только администратору.")
+        return
+
+    from src import config as _cfg
+    if not _cfg.YOUTUBE_API_KEY:
+        await message.answer(
+            "⚠️ YouTube API недоступен.\n\n"
+            "Добавь в `.env`:\n"
+            "```\nYOUTUBE_API_KEY=ваш_ключ\n```\n"
+            "Получить ключ: console.cloud.google.com → YouTube Data API v3",
+            parse_mode="Markdown",
+        )
+        return
+
+    await bot.send_chat_action(message.chat.id, "typing")
+    from src.youtube_updater import check_new_videos
+    try:
+        all_ids, new_ids = await check_new_videos(_cfg.YOUTUBE_API_KEY, _cfg.YOUTUBE_CHANNEL_HANDLE)
+        if not all_ids:
+            await message.answer("❌ Не удалось получить список видео. Проверь YOUTUBE_API_KEY.")
+            return
+        text = (
+            f"📺 *Канал {_cfg.YOUTUBE_CHANNEL_HANDLE}*\n\n"
+            f"Всего видео: {len(all_ids)}\n"
+            f"Известных в KB: {len(__import__('src.youtube_loader', fromlist=['CHANNEL_VIDEO_IDS']).CHANNEL_VIDEO_IDS)}\n"
+            f"*Новых: {len(new_ids)}*"
+        )
+        if new_ids:
+            text += f"\n\nID новых видео:\n" + "\n".join(f"• `{v}`" for v in new_ids[:10])
+            text += f"\n\nДля загрузки используй /yt\\_update"
+        else:
+            text += "\n\n✅ База знаний актуальна — новых видео нет."
+        await message.answer(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("yt_check error: %s", e)
+        await message.answer(f"Ошибка при проверке: {e}")
+
+
+@dp.message(Command("yt_update"))
+async def cmd_yt_update(message: types.Message):
+    """Скачать субтитры новых видео и пересобрать базу знаний."""
+    if ADMIN_CHAT_ID is None or message.from_user.id != ADMIN_CHAT_ID:
+        await message.answer("⛔ Команда доступна только администратору.")
+        return
+
+    from src import config as _cfg
+    if not _cfg.YOUTUBE_API_KEY:
+        await message.answer("⚠️ YOUTUBE_API_KEY не задан в .env.")
+        return
+
+    await message.answer("⏳ Проверяю новые видео и обновляю базу знаний...")
+    await bot.send_chat_action(message.chat.id, "typing")
+    from src.youtube_updater import run_update
+    try:
+        report = await run_update(_cfg.YOUTUBE_API_KEY, _cfg.YOUTUBE_CHANNEL_HANDLE)
+        # Перезагрузить KB в боте если пересобрана
+        if "пересобрана" in report:
+            try:
+                orchestrator.load_kb()
+                inspector.kb = orchestrator._beebot.kb
+                report += f"\n\n🔄 KB перезагружена в боте: {len(orchestrator._beebot.kb.chunks)} чанков"
+            except Exception as e:
+                report += f"\n\n⚠️ KB пересобрана, но перезагрузка не удалась: {e}"
+        await message.answer(report, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("yt_update error: %s", e)
+        await message.answer(f"Ошибка при обновлении: {e}")
+
+
+# ===========================================================================
+# FAQ — /faq  (только ADMIN_CHAT_ID)
+# ===========================================================================
+
+@dp.message(Command("faq"))
+async def cmd_faq(message: types.Message):
+    """Показать топ частых вопросов пользователей."""
+    if ADMIN_CHAT_ID is None or message.from_user.id != ADMIN_CHAT_ID:
+        await message.answer("⛔ Команда доступна только администратору.")
+        return
+
+    # Принудительно сохранить FAQ на диск
+    orchestrator.flush_faq()
+
+    # Получить аргумент N (по умолчанию 20)
+    args = (message.text or "").removeprefix("/faq").strip()
+    try:
+        n = int(args) if args else 20
+        n = max(5, min(50, n))
+    except ValueError:
+        n = 20
+
+    top = orchestrator.get_top_queries(n)
+    if not top:
+        await message.answer("📝 FAQ пока пуст — пользователи ещё не задавали вопросов.")
+        return
+
+    total = sum(c for _, c in top)
+    lines = [f"📝 *Топ-{n} частых вопросов* (всего запросов: {total}):\n"]
+    for i, (query, count) in enumerate(top, 1):
+        bar = "▪" * min(count, 10)
+        lines.append(f"{i}. [{count}] {bar} {query}")
+
+    await message.answer("\n".join(lines), parse_mode="Markdown")
 
 
 @dp.callback_query(F.data == "show_products")

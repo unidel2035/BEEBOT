@@ -1110,7 +1110,8 @@ async def main():
     try:
         orchestrator.load_kb()
         inspector.kb = orchestrator._beebot.kb  # разделяем KB с beebot
-        logger.info(f"Knowledge base loaded: {len(orchestrator._beebot.kb.chunks)} chunks")
+        kb = orchestrator._beebot.kb
+        logger.info(f"Knowledge base loaded: {len(kb.chunks)} chunks")
     except FileNotFoundError:
         logger.error("Knowledge base not found! Run `python -m src.build_kb` first.")
         return
@@ -1124,6 +1125,15 @@ async def main():
             # Передать CRM-клиент всем агентам
             logist._crm = integram_client
             analyst._crm = integram_client
+            # Динамический keyword-буст из CRM
+            try:
+                products = await integram_client.get_products()
+                names = [p.name for p in products if p.name]
+                added = kb.update_keywords_from_products(names)
+                if added:
+                    logger.info("KB keyword-буст: добавлено %d ключей из CRM (%d товаров)", added, len(names))
+            except Exception as _e:
+                logger.warning("Не удалось обновить keyword-буст из CRM: %s", _e)
             logger.info("Integram CRM подключена — агенты получили доступ к данным.")
         except Exception as e:
             logger.warning("Integram CRM недоступна: %s — агенты работают без CRM.", e)

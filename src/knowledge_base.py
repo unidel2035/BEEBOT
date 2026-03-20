@@ -78,14 +78,6 @@ class StyleAnalyzer:
 class KnowledgeBase:
     """Hybrid vector knowledge base with semantic + stylometric search."""
 
-    def __init__(self):
-        self.model: TextEmbedding | None = None
-        self.style_analyzer = StyleAnalyzer()
-        self.index: faiss.IndexFlatIP | None = None
-        self.chunks: list[dict] = []
-        self.semantic_dim = 0
-        self.style_dim = 5
-
     def _load_model(self):
         if self.model is None:
             self.model = TextEmbedding(model_name=EMBEDDING_MODEL)
@@ -174,8 +166,8 @@ class KnowledgeBase:
         with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
             self.chunks = json.load(f)
 
-    # Keyword → source name mapping for direct product queries
-    KEYWORD_SOURCES = {
+    # Keyword → source name mapping for direct product queries (базовый набор)
+    _BASE_KEYWORD_SOURCES: dict[str, str] = {
         "перга":         "pdf:Перга",
         "пергу":         "pdf:Перга",
         "пергой":        "pdf:Перга",
@@ -199,6 +191,47 @@ class KnowledgeBase:
         "фитоэнергия":   "pdf:ФитоЭнергия",
         "иммунитет":     "pdf:Иммунитет ребенка",
     }
+
+    def __init__(self):
+        self.model: TextEmbedding | None = None
+        self.style_analyzer = StyleAnalyzer()
+        self.index: faiss.IndexFlatIP | None = None
+        self.chunks: list[dict] = []
+        self.semantic_dim = 0
+        self.style_dim = 5
+        # Копируем базовый набор — динамически расширяется из CRM
+        self.KEYWORD_SOURCES: dict[str, str] = dict(self._BASE_KEYWORD_SOURCES)
+
+    def update_keywords_from_products(self, product_names: list[str]) -> int:
+        """Дополнить KEYWORD_SOURCES ключевыми словами из названий товаров CRM.
+
+        Для каждого названия товара ищет совпадение с существующими KB-источниками.
+        Слова длиной < 4 символов игнорируются.
+
+        Returns:
+            Количество добавленных новых ключевых слов.
+        """
+        kb_sources = {c.get("source", "") for c in self.chunks}
+        added = 0
+
+        for name in product_names:
+            name_lower = name.lower().strip()
+            words = [w.strip(".,()«»\"'") for w in name_lower.split() if len(w.strip(".,()«»\"'")) >= 4]
+
+            for word in words:
+                if word in self.KEYWORD_SOURCES:
+                    continue
+                # Найти подходящий KB-источник: ищем source, содержащий это слово
+                matched_source = None
+                for src in kb_sources:
+                    if src.startswith("pdf:") and word in src.lower():
+                        matched_source = src
+                        break
+                if matched_source:
+                    self.KEYWORD_SOURCES[word] = matched_source
+                    added += 1
+
+        return added
 
     def _keyword_chunks(self, query: str, n: int = 2) -> list[dict]:
         """Return top-n chunks from a product source if query contains a keyword."""

@@ -28,7 +28,7 @@ _PARSE_SYSTEM = (
     "Ты классификатор аналитических запросов. "
     "По тексту пользователя верни одну строку в формате:\n"
     "  period=<week|month|all>  — период анализа\n"
-    "  report=<orders|top|packaging|clients|delivery|sources|summary>  — тип отчёта\n\n"
+    "  report=<orders|top|packaging|clients|delivery|sources|abc|seasonal|forecast|summary>  — тип отчёта\n\n"
     "Правила:\n"
     "  week  — 'неделю', 'за 7 дней', 'на этой неделе'\n"
     "  month — 'месяц', 'март', 'за 30 дней', 'в этом месяце'\n"
@@ -39,11 +39,17 @@ _PARSE_SYSTEM = (
     "  clients   — клиенты, новые, повторные, постоянные\n"
     "  delivery  — способы доставки, СДЭК, Почта\n"
     "  sources   — откуда заказы, источники, каналы, Telegram, UDS\n"
+    "  abc       — ABC-анализ клиентов, ключевые клиенты, сегменты A/B/C\n"
+    "  seasonal  — сезонность, по месяцам, динамика, история продаж\n"
+    "  forecast  — прогноз, план, следующий месяц, что заготовить\n"
     "  summary   — общая статистика или любой другой запрос\n\n"
     "Ответь ТОЛЬКО двумя параметрами через пробел, например: period=week report=top"
 )
 
-_VALID_REPORTS = {"orders", "top", "packaging", "clients", "delivery", "sources", "summary"}
+_VALID_REPORTS = {
+    "orders", "top", "packaging", "clients", "delivery", "sources",
+    "abc", "seasonal", "forecast", "summary",
+}
 
 
 def _parse_analyst_query(groq_client, model: str, query: str) -> tuple[str, str]:
@@ -263,6 +269,190 @@ def format_sources_report(orders: list, period: str) -> str:
     return "\n".join(lines)
 
 
+def format_abc_report(orders: list, items_by_order: dict, period: str) -> str:
+    """ABC-анализ клиентов: A = 80% выручки, B = 80–95%, C = 95–100%."""
+    label = _period_label(period)
+    if not orders:
+        return f"🔢 *ABC-анализ клиентов {label}:* нет данных."
+
+    # Агрегировать выручку по клиентам
+    client_revenue: defaultdict[int, float] = defaultdict(float)
+    client_names: dict[int, str] = {}
+    client_orders_count: defaultdict[int, int] = defaultdict(int)
+    for o in orders:
+        cid = o.client_id or 0
+        client_revenue[cid] += o.total or 0
+        client_orders_count[cid] += 1
+        if o.client_name and cid:
+            client_names[cid] = o.client_name
+
+    if not client_revenue:
+        return f"🔢 *ABC-анализ {label}:* нет данных по клиентам."
+
+    total_rev = sum(client_revenue.values())
+    sorted_clients = sorted(client_revenue.items(), key=lambda x: x[1], reverse=True)
+
+    # Сегментация: A до 80%, B до 95%, C — остальные
+    segments: dict[str, list] = {"A": [], "B": [], "C": []}
+    cumulative = 0.0
+    for cid, rev in sorted_clients:
+        pct = rev / total_rev * 100 if total_rev else 0
+        cumulative += rev / total_rev * 100 if total_rev else 0
+        seg = "A" if cumulative <= 80 else ("B" if cumulative <= 95 else "C")
+        segments[seg].append((cid, rev, pct))
+
+    lines = [
+        f"🔢 *ABC-анализ клиентов {label}:*\n",
+        f"Всего клиентов: {len(sorted_clients)}, выручка: {total_rev:,.0f} ₽\n",
+    ]
+    seg_labels = {
+        "A": ("🥇", "Ключевые", "до 80% выручки"),
+        "B": ("🥈", "Перспективные", "80–95% выручки"),
+        "C": ("🥉", "Разовые", "95–100% выручки"),
+    }
+    for seg, (emoji, title, desc) in seg_labels.items():
+        clients = segments[seg]
+        if not clients:
+            continue
+        seg_rev = sum(r for _, r, _ in clients)
+        lines.append(
+            f"{emoji} *Сегмент {seg} — {title}* ({desc}): "
+            f"{len(clients)} клиент., {seg_rev:,.0f} ₽"
+        )
+        # Топ-3 по сегменту
+        for cid, rev, pct in clients[:3]:
+            name = client_names.get(cid, f"#{cid}")
+            cnt = client_orders_count[cid]
+            lines.append(f"  • {name} — {rev:,.0f} ₽ ({cnt} заказ.)")
+        if len(clients) > 3:
+            lines.append(f"  ... и ещё {len(clients) - 3}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def format_seasonal_report(orders: list, items_by_order: dict) -> str:
+    """Сезонная аналитика — продажи по месяцам."""
+    if not orders:
+        return "📅 *Сезонная аналитика:* нет данных."
+
+    monthly: defaultdict[str, dict] = defaultdict(lambda: {"count": 0, "revenue": 0.0})
+    for o in orders:
+        try:
+            if isinstance(o.date, datetime):
+                dt = o.date
+            else:
+                raw = str(o.date)
+                # Парсинг DD.MM.YYYY
+                if "." in raw and len(raw) >= 8:
+                    parts = raw.split(".")
+                    dt = datetime(int(parts[2][:4]), int(parts[1]), int(parts[0]))
+                else:
+                    dt = datetime.fromisoformat(raw)
+            key = dt.strftime("%Y-%m")
+        except Exception:
+            continue
+        monthly[key]["count"] += 1
+        monthly[key]["revenue"] += o.total or 0
+
+    if not monthly:
+        return "📅 *Сезонная аналитика:* не удалось разобрать даты заказов."
+
+    sorted_months = sorted(monthly.items())
+    max_rev = max(v["revenue"] for v in monthly.values()) or 1
+
+    _RU_MONTHS = {
+        "01": "Янв", "02": "Фев", "03": "Мар", "04": "Апр",
+        "05": "Май", "06": "Июн", "07": "Июл", "08": "Авг",
+        "09": "Сен", "10": "Окт", "11": "Ноя", "12": "Дек",
+    }
+
+    total_rev = sum(v["revenue"] for v in monthly.values())
+    total_cnt = sum(v["count"] for v in monthly.values())
+    peak_month, peak_data = max(monthly.items(), key=lambda x: x[1]["revenue"])
+    pm_parts = peak_month.split("-")
+    peak_label = f"{_RU_MONTHS.get(pm_parts[1], pm_parts[1])} {pm_parts[0]}"
+
+    lines = [
+        "📅 *Сезонная аналитика (все данные):*\n",
+        f"Период: {sorted_months[0][0]} — {sorted_months[-1][0]}",
+        f"Всего: {total_cnt} заказов, {total_rev:,.0f} ₽",
+        f"Пик: *{peak_label}* — {peak_data['count']} заказ., {peak_data['revenue']:,.0f} ₽\n",
+    ]
+
+    for ym, data in sorted_months:
+        parts = ym.split("-")
+        month_label = f"{_RU_MONTHS.get(parts[1], parts[1])} {parts[0]}"
+        bar_len = int(data["revenue"] / max_rev * 15)
+        bar = "█" * bar_len
+        lines.append(
+            f"{month_label}: {data['count']:3d} зак. | {data['revenue']:>8,.0f} ₽  {bar}"
+        )
+
+    return "\n".join(lines)
+
+
+def format_forecast_report(orders: list, items_by_order: dict) -> str:
+    """Прогноз спроса на следующий месяц на основе среднего за последние 3 месяца."""
+    if not orders:
+        return "🔮 *Прогноз спроса:* нет данных."
+
+    now = datetime.now()
+    # Взять последние 3 полных месяца
+    three_months_ago = now - timedelta(days=90)
+
+    recent_orders = []
+    for o in orders:
+        try:
+            if isinstance(o.date, datetime):
+                dt = o.date
+            else:
+                raw = str(o.date)
+                if "." in raw and len(raw) >= 8:
+                    parts = raw.split(".")
+                    dt = datetime(int(parts[2][:4]), int(parts[1]), int(parts[0]))
+                else:
+                    dt = datetime.fromisoformat(raw)
+            if dt >= three_months_ago:
+                recent_orders.append(o)
+        except Exception:
+            continue
+
+    if not recent_orders:
+        return "🔮 *Прогноз спроса:* недостаточно данных за последние 3 месяца."
+
+    # Подсчитать среднемесячный спрос по товарам
+    qty_total: Counter = Counter()
+    revenue_total: defaultdict[str, float] = defaultdict(float)
+    for o in recent_orders:
+        items = items_by_order.get(o.id, [])
+        for item in items:
+            name = item.product_name or f"Товар #{item.product_id}"
+            qty_total[name] += item.quantity
+            revenue_total[name] += item.total
+
+    if not qty_total:
+        return "🔮 *Прогноз спроса:* нет позиций в заказах за последние 3 месяца."
+
+    # Среднее за месяц (делим на 3)
+    next_month = (now.replace(day=1) + timedelta(days=32)).strftime("%B %Y")
+    lines = [
+        f"🔮 *Прогноз спроса на следующий месяц:*\n",
+        f"Основан на средних продажах за последние 3 месяца ({len(recent_orders)} заказов)\n",
+        "*Рекомендуемый запас:*",
+    ]
+    for name, qty in qty_total.most_common(10):
+        avg_qty = max(1, round(qty / 3))
+        avg_rev = revenue_total[name] / 3
+        lines.append(f"  • {name}: ~*{avg_qty} шт.* (~{avg_rev:,.0f} ₽/мес)")
+
+    avg_orders = round(len(recent_orders) / 3)
+    avg_revenue = sum((o.total or 0) for o in recent_orders) / 3
+    lines.append(f"\nОжидаемо заказов: ~{avg_orders}, выручка: ~{avg_revenue:,.0f} ₽")
+
+    return "\n".join(lines)
+
+
 def format_summary_report(orders: list, items_by_order: dict, period: str) -> str:
     """Сводный отчёт: заказы + топ 5 товаров + клиенты."""
     orders_part = format_orders_report(orders, period)
@@ -300,8 +490,8 @@ class AnalystAgent:
 
         # Загрузить позиции для отчётов по товарам
         items_by_order: dict = {}
-        if report_type in ("top", "packaging", "summary") and self._crm:
-            items_by_order = await self._fetch_items(orders)
+        if self._crm:
+            items_by_order = await self._fetch_items_for_report(orders, report_type)
 
         return self._build_report(orders, items_by_order, period, report_type)
 
@@ -369,6 +559,13 @@ class AnalystAgent:
 
         return _filter_by_period(all_orders, period)
 
+    async def _fetch_items_for_report(self, orders: list, report_type: str) -> dict:
+        """Загрузить позиции только если нужны для данного типа отчёта."""
+        needs_items = {"top", "packaging", "summary", "abc", "seasonal", "forecast"}
+        if report_type not in needs_items:
+            return {}
+        return await self._fetch_items(orders)
+
     async def _fetch_items(self, orders: list) -> dict:
         """Загрузить позиции для списка заказов.
 
@@ -418,6 +615,12 @@ class AnalystAgent:
             return format_delivery_report(orders, period)
         elif report_type == "sources":
             return format_sources_report(orders, period)
+        elif report_type == "abc":
+            return format_abc_report(orders, items_by_order, period)
+        elif report_type == "seasonal":
+            return format_seasonal_report(orders, items_by_order)
+        elif report_type == "forecast":
+            return format_forecast_report(orders, items_by_order)
         else:
             return format_summary_report(orders, items_by_order, period)
 
@@ -444,6 +647,12 @@ def _keyword_classify(query: str) -> tuple[str, str]:
     # Тип отчёта
     if any(w in q for w in ("фасов", "готовить", "упаковат", "запас")):
         report = "packaging"
+    elif any(w in q for w in ("прогноз", "следующий месяц", "план на", "что заготов")):
+        report = "forecast"
+    elif any(w in q for w in ("abc", "а б ц", "ключевые клиент", "сегмент")):
+        report = "abc"
+    elif any(w in q for w in ("сезон", "по месяцам", "ежемесячно", "динамика", "история продаж")):
+        report = "seasonal"
     elif any(w in q for w in ("топ", "лучш", "популярн", "продаётся", "продается")):
         report = "top"
     elif any(w in q for w in ("сколько заказов", "количество заказов", "заказов за")):

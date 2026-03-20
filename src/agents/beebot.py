@@ -79,8 +79,9 @@ class BeebotAgent:
         self,
         query: str,
         history: list[dict] | None = None,
+        style: str | None = None,
     ) -> tuple[str, list[dict]]:
         """Ответить на вопрос. Возвращает (ответ, список чанков)."""
         chunks = self.kb.search(query)
-        response = self.llm.generate(query, chunks, history=history)
+        response = self.llm.generate(query, chunks, history=history, style=style)
         return response, chunks

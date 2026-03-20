@@ -39,9 +39,13 @@ from src.agents.logist import (
 from src.orchestrator import Orchestrator
 from src.agents.analyst import AnalystAgent
 from src.admin import router as admin_router, setup_admin
+from src.llm_client import VOICE_STYLES, DEFAULT_VOICE
 from src.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+
+# «Голос Улья» — стиль ответов, выбранный пользователем (user_id → style_id)
+_user_styles: dict[int, str] = {}
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -89,6 +93,7 @@ HELP_MESSAGE = """Как пользоваться ботом:
 /help — эта справка
 /products — список продуктов с инструкциями
 /order — оформить заказ
+/voice — сменить стиль ответов (Голос Улья)
 /stats [запрос] — аналитика продаж (админ)
 /orders [статус] — список заказов (админ)
 /order <ID> — детали заказа (админ)
@@ -96,6 +101,11 @@ HELP_MESSAGE = """Как пользоваться ботом:
 /track <ID> <трек> — добавить трек-номер (админ)
 /clients — список клиентов (админ)
 /stock — каталог товаров (админ)"""
+
+VOICE_HIVE_MESSAGE = (
+    "🎙️ *Голос Улья* — выбери стиль ответов:\n\n"
+    "Это не разные персонажи — это разные грани одного пчеловода."
+)
 
 ASK_MESSAGE = "Напишите свой вопрос — я отвечу на основе знаний о продуктах пчеловодства 🐝"
 
@@ -181,6 +191,45 @@ async def cmd_ask(message: types.Message):
 @dp.message(Command("products"))
 async def cmd_products(message: types.Message):
     await message.answer(PRODUCTS_MESSAGE, reply_markup=_build_products_keyboard())
+
+
+def _build_voice_keyboard(current_style: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора «Голоса Улья»."""
+    rows = []
+    for sid, sdata in VOICE_STYLES.items():
+        check = "✅ " if sid == current_style else ""
+        label = f"{check}{sdata['emoji']} {sdata['name']} — {sdata['desc']}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"voice_style:{sid}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(Command("voice"))
+async def cmd_voice(message: types.Message):
+    """Выбрать стиль ответов «Голос Улья»."""
+    current = _user_styles.get(message.from_user.id, DEFAULT_VOICE)
+    await message.answer(
+        VOICE_HIVE_MESSAGE,
+        parse_mode="Markdown",
+        reply_markup=_build_voice_keyboard(current),
+    )
+
+
+@dp.callback_query(F.data.startswith("voice_style:"))
+async def cb_voice_style(callback: types.CallbackQuery):
+    """Сохранить выбранный стиль «Голос Улья»."""
+    style_id = callback.data.split(":", 1)[1]
+    if style_id not in VOICE_STYLES:
+        await callback.answer("Неизвестный стиль", show_alert=True)
+        return
+    _user_styles[callback.from_user.id] = style_id
+    sdata = VOICE_STYLES[style_id]
+    await callback.answer(f"{sdata['emoji']} {sdata['name']} активирован!")
+    await callback.message.edit_text(
+        f"✅ Стиль *{sdata['emoji']} {sdata['name']}* выбран.\n\n"
+        f"_{sdata['desc']}_\n\n"
+        "Задай любой вопрос — отвечу в этом стиле.",
+        parse_mode="Markdown",
+    )
 
 
 @dp.message(Command("stats"))
@@ -279,8 +328,9 @@ async def handle_question(message: types.Message, state: FSMContext):
     logger.info(f"Question from {message.from_user.id} in {message.chat.type}: {query}")
     await bot.send_chat_action(message.chat.id, "typing")
 
+    style = _user_styles.get(message.from_user.id)
     try:
-        response, chunks = await orchestrator.route(message.from_user.id, query)
+        response, chunks = await orchestrator.route(message.from_user.id, query, style=style)
         intent = orchestrator.get_intent(message.from_user.id)
         logger.info(f"Intent: {intent}, chunks: {len(chunks)}")
 
@@ -906,6 +956,12 @@ async def _alert(text: str) -> None:
         logger.warning("Не удалось отправить Telegram-алерт: %s", e)
 
 
+@dp.startup()
+async def on_startup(_: Bot) -> None:
+    """Отправить алерт о старте после установки соединения с Telegram."""
+    await _alert("🟢 BEEBOT запущен")
+
+
 async def main():
     setup_logging()
     logger.info("Starting BEEBOT...")
@@ -969,7 +1025,6 @@ async def main():
         logger.info("UDS не настроен (UDS_API_KEY/UDS_COMPANY_ID не заданы) — поллер пропущен.")
 
     logger.info("Bot is running!")
-    await _alert("🟢 BEEBOT запущен")
     _crashed = False
     try:
         await dp.start_polling(bot)

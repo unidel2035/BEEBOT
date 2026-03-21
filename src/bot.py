@@ -52,14 +52,7 @@ logger = logging.getLogger(__name__)
 # «Голос Улья» — стиль ответов, выбранный пользователем (user_id → style_id)
 _user_styles: dict[int, str] = {}
 
-if TG_SOCKS_PROXY:
-    from aiohttp_socks import ProxyConnector
-    from aiogram.client.session.aiohttp import AiohttpSession
-    _session = AiohttpSession(connector=ProxyConnector.from_url(TG_SOCKS_PROXY))
-    bot = Bot(token=TELEGRAM_BOT_TOKEN, session=_session)
-    logger.info("Telegram via SOCKS5 proxy: %s", TG_SOCKS_PROXY)
-else:
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+bot = Bot(token=TELEGRAM_BOT_TOKEN)  # может быть переопределён в main() с прокси
 dp = Dispatcher(storage=MemoryStorage())
 
 # Админ-роутер регистрируется первым — его команды имеют приоритет
@@ -1228,7 +1221,17 @@ async def on_startup(**_kwargs) -> None:
 
 
 async def main():
+    global bot
     setup_logging()
+    # Инициализировать SOCKS5-прокси здесь, внутри event loop
+    if TG_SOCKS_PROXY:
+        from aiohttp_socks import ProxyConnector
+        from aiogram.client.session.aiohttp import AiohttpSession
+        bot = Bot(
+            token=TELEGRAM_BOT_TOKEN,
+            session=AiohttpSession(connector=ProxyConnector.from_url(TG_SOCKS_PROXY)),
+        )
+        logger.info("Telegram via SOCKS5 proxy: %s", TG_SOCKS_PROXY)
     logger.info("Starting BEEBOT...")
     try:
         orchestrator.load_kb()

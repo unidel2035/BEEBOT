@@ -18,7 +18,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID
+from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID, TG_SOCKS_PROXY
 from src.phone_utils import validate_phone, format_phone
 from src.delivery.tracker import OrderTracker
 from src.integrations.uds import UDSClient, UDSPoller
@@ -52,7 +52,14 @@ logger = logging.getLogger(__name__)
 # «Голос Улья» — стиль ответов, выбранный пользователем (user_id → style_id)
 _user_styles: dict[int, str] = {}
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+if TG_SOCKS_PROXY:
+    from aiohttp_socks import ProxyConnector
+    from aiogram.client.session.aiohttp import AiohttpSession
+    _session = AiohttpSession(connector=ProxyConnector.from_url(TG_SOCKS_PROXY))
+    bot = Bot(token=TELEGRAM_BOT_TOKEN, session=_session)
+    logger.info("Telegram via SOCKS5 proxy: %s", TG_SOCKS_PROXY)
+else:
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Админ-роутер регистрируется первым — его команды имеют приоритет

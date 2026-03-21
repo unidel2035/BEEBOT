@@ -8,6 +8,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# SOCKS5 прокси для обхода блокировки api.telegram.org (если VPS не может достучаться)
+# Настроить совместно с tg-socks.service + groq-tunnel.service на hive
+TG_SOCKS_PROXY = os.getenv("TG_SOCKS_PROXY")  # e.g. socks5://localhost:9150
 
 # Groq
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")

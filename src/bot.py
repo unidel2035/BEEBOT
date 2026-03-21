@@ -1225,12 +1225,8 @@ async def main():
     setup_logging()
     # Инициализировать SOCKS5-прокси здесь, внутри event loop
     if TG_SOCKS_PROXY:
-        from aiohttp_socks import ProxyConnector
         from aiogram.client.session.aiohttp import AiohttpSession
-        bot = Bot(
-            token=TELEGRAM_BOT_TOKEN,
-            session=AiohttpSession(connector=ProxyConnector.from_url(TG_SOCKS_PROXY)),
-        )
+        bot = Bot(token=TELEGRAM_BOT_TOKEN, session=AiohttpSession(proxy=TG_SOCKS_PROXY))
         logger.info("Telegram via SOCKS5 proxy: %s", TG_SOCKS_PROXY)
     logger.info("Starting BEEBOT...")
     try:

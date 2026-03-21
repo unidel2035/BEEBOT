@@ -161,10 +161,11 @@ class KnowledgeBase:
             json.dump(self.chunks, f, ensure_ascii=False, indent=2)
 
     def load(self):
-        """Load FAISS index and chunks from disk. Model is loaded lazily on first search."""
+        """Load FAISS index, chunks, and embedding model from disk."""
         self.index = faiss.read_index(str(FAISS_INDEX_PATH))
         with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
             self.chunks = json.load(f)
+        self._load_model()  # загружать модель при старте, не при первом запросе
 
     # Keyword → source name mapping for direct product queries (базовый набор)
     _BASE_KEYWORD_SOURCES: dict[str, str] = {

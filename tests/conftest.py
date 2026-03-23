@@ -37,8 +37,7 @@ def _make_fake_text_embedding():
 
 @pytest.fixture(autouse=True)
 def mock_fastembed(request):
-    """Автоматически патчим TextEmbedding во всех тестах — модель не нужна на диске."""
-    # Пропускаем патч для тестов, которые явно помечены как требующие реальной модели
+    """Патчим TextEmbedding во всех тестах — ONNX-модель не нужна."""
     if request.node.get_closest_marker("real_model"):
         yield
         return

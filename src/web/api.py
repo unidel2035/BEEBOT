@@ -5,7 +5,7 @@
   GET  /api/auth/me             — текущий пользователь (username, role)
   GET  /api/dashboard           — статистика (admin)
   GET  /api/orders              — список заказов (admin + warehouse)
-  POST /api/orders              — создать заказ (admin + warehouse)
+POST /api/orders              — создать заказ (admin + warehouse)
   GET  /api/orders/{id}         — заказ по ID (admin + warehouse)
   PATCH /api/orders/{id}/status — сменить статус заказа (admin; warehouse ограничен)
   PATCH /api/orders/{id}/tracking — ввести трек-номер (admin)
@@ -259,6 +259,16 @@ class ProductUpdate(BaseModel):
 
 class StockUpdate(BaseModel):
     stock: int
+
+
+class CreateOrderRequest(BaseModel):
+    client_name: str
+    phone: Optional[str] = None
+    delivery_method: Optional[str] = None
+    delivery_address: Optional[str] = None
+    delivery_cost: Optional[float] = None
+    comment: Optional[str] = None
+    items: list[ItemCreate]
 
 
 class UserCreate(BaseModel):
@@ -621,7 +631,7 @@ async def create_order_web(
                 delivery_method=body.delivery_method or "",
                 delivery_address=body.delivery_address,
                 delivery_cost=body.delivery_cost or 0,
-                source=body.source or "Сайт",
+source=body.source or "Сайт",
             )
             return _order_to_dict(order)
         finally:

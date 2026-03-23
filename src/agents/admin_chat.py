@@ -7,10 +7,21 @@
 import asyncio
 import logging
 import time
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _valid_date(order) -> bool:
+    """Вернуть True если у заказа есть валидная дата (не epoch 1970)."""
+    try:
+        dt = order.date if isinstance(order.date, datetime) else datetime.fromisoformat(str(order.date))
+        return dt.year >= 2020
+    except Exception:
+        return False
+
 
 _SYSTEM = """Ты — личный ассистент пчеловода Александра Дмитрова, владельца «Усадьба Дмитровых».
 
@@ -62,14 +73,39 @@ class AdminChatAgent:
             revenue_total = sum((o.total or 0) for o in orders)
             lines.append(f"ЗАКАЗЫ: {len(orders)} всего, {len(active)} активных, выручка {revenue_total:,.0f} ₽")
 
-            # Последние 10 с датой
-            if orders:
+            # Помесячная статистика (только заказы с валидной датой > 2020)
+            monthly: dict[str, dict] = defaultdict(lambda: {"count": 0, "revenue": 0.0})
+            _RU = {"01":"Янв","02":"Фев","03":"Мар","04":"Апр","05":"Май","06":"Июн",
+                   "07":"Июл","08":"Авг","09":"Сен","10":"Окт","11":"Ноя","12":"Дек"}
+            for o in orders:
+                try:
+                    dt = o.date if isinstance(o.date, datetime) else datetime.fromisoformat(str(o.date))
+                    if dt.year < 2020:
+                        continue  # пропустить UDS-заказы без даты (epoch)
+                    key = dt.strftime("%Y-%m")
+                    monthly[key]["count"] += 1
+                    monthly[key]["revenue"] += o.total or 0
+                except Exception:
+                    continue
+            if monthly:
+                lines.append("Статистика по месяцам:")
+                for ym in sorted(monthly)[-6:]:
+                    y, m = ym.split("-")
+                    label = f"{_RU.get(m, m)} {y}"
+                    d = monthly[ym]
+                    lines.append(f"  {label}: {d['count']} заказ., {d['revenue']:,.0f} ₽")
+
+            # Последние 10 заказов с валидной датой
+            valid = [o for o in orders if _valid_date(o)]
+            recent = list(reversed(valid[-10:])) if valid else []
+            if recent:
                 lines.append("Последние 10 заказов (номер | дата | статус | сумма):")
-                for o in reversed(orders[-10:]):
+                for o in recent:
                     try:
-                        date_str = o.date.strftime("%d.%m.%Y") if o.date else "—"
+                        dt = o.date if isinstance(o.date, datetime) else datetime.fromisoformat(str(o.date))
+                        date_str = dt.strftime("%d.%m.%Y")
                     except Exception:
-                        date_str = str(o.date)[:10] if o.date else "—"
+                        date_str = "—"
                     lines.append(f"  #{o.number} | {date_str} | {o.status} | {o.total or 0:.0f} ₽")
         except Exception as e:
             lines.append(f"Ошибка загрузки заказов: {e}")

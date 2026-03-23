@@ -20,6 +20,7 @@ RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='se
 # Copy application code
 COPY src/ src/
 COPY data/processed/ data/processed/
+COPY data/texts/ data/texts/
 
 # Copy PDF files (moved to data/pdfs/)
 COPY data/pdfs/ data/pdfs/

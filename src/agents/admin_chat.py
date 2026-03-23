@@ -98,15 +98,43 @@ class AdminChatAgent:
             # Последние 10 заказов с валидной датой
             valid = [o for o in orders if _valid_date(o)]
             recent = list(reversed(valid[-10:])) if valid else []
+
+            # Позиции всех заказов (bulk-запрос)
+            items_by_order: dict[int, list] = defaultdict(list)
+            try:
+                all_items = await self._crm.get_order_items_bulk()
+                for item in all_items:
+                    items_by_order[item.order_id].append(item)
+            except Exception:
+                pass
+
             if recent:
-                lines.append("Последние 10 заказов (номер | дата | статус | сумма):")
+                lines.append("Последние 10 заказов (номер | дата | статус | сумма | товары):")
                 for o in recent:
                     try:
                         dt = o.date if isinstance(o.date, datetime) else datetime.fromisoformat(str(o.date))
                         date_str = dt.strftime("%d.%m.%Y")
                     except Exception:
                         date_str = "—"
-                    lines.append(f"  #{o.number} | {date_str} | {o.status} | {o.total or 0:.0f} ₽")
+                    order_items = items_by_order.get(o.id, [])
+                    items_str = ", ".join(
+                        f"{i.product_name or 'товар'} ×{i.quantity}" for i in order_items
+                    ) if order_items else "—"
+                    lines.append(f"  #{o.number} | {date_str} | {o.status} | {o.total or 0:.0f} ₽ | {items_str}")
+
+            # Топ-10 товаров по количеству заказов
+            if items_by_order:
+                from collections import Counter
+                product_counts: Counter = Counter()
+                for item_list in items_by_order.values():
+                    for item in item_list:
+                        name = item.product_name or "неизвестно"
+                        product_counts[name] += item.quantity
+                top = product_counts.most_common(10)
+                if top:
+                    lines.append("Топ-10 товаров по суммарному количеству в заказах:")
+                    for name, qty in top:
+                        lines.append(f"  {name}: {qty} шт.")
         except Exception as e:
             lines.append(f"Ошибка загрузки заказов: {e}")
 

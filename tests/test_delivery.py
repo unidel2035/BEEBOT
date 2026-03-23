@@ -114,7 +114,7 @@ class TestCDEKProvider:
 
     @pytest.mark.asyncio
     async def test_track_shipment_returns_dict(self):
-"""track_shipment реализован и возвращает dict (с fallback при отсутствии токена)."""
+        """track_shipment реализован и возвращает dict (с fallback при отсутствии токена)."""
         provider = PochtaProvider()
         result = await provider.track_shipment("80123456789RU")
         assert isinstance(result, dict)
@@ -332,12 +332,12 @@ class TestDeliveryCalculatorRealProviders:
     async def test_cdek_track_returns_status(self):
         calc = DeliveryCalculator()
         result = await calc.track("CDEK-001", provider_name="СДЭК")
-assert isinstance(result, TrackingStatus)
+        assert isinstance(result, TrackingStatus)
         assert result.status
 
     @pytest.mark.asyncio
     async def test_pochta_track_returns_status(self):
         calc = DeliveryCalculator()
         result = await calc.track("80123456789RU", provider_name="Почта России")
-assert isinstance(result, TrackingStatus)
+        assert isinstance(result, TrackingStatus)
         assert result.status

@@ -23,6 +23,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from src.config import ADMIN_CHAT_ID, BEEKEEPER_CHAT_ID
 from src.integram_client import IntegramClient, IntegramError, IntegramNotFoundError
 from src.notifications import Notifier
+from src.web.notifications import notify_client_status_change, notify_beekeeper_status_change
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,7 @@ async def cmd_status(message: types.Message) -> None:
         await _crm.authenticate()
         await _crm.update_order_status(order_id, matched)
         await message.answer(f"✅ Заказ #{order_id} → *{matched}*", parse_mode="Markdown")
+        await _notify_status_change(order_id, matched)
     except IntegramError as e:
         await message.answer(f"Ошибка: {e}")
 
@@ -471,11 +473,8 @@ async def _change_order_status_cb(
             parse_mode="Markdown",
         )
 
-        # Уведомить клиента о подтверждении
-        if new_status == "Подтверждён" and _notifier:
-            client_tg_id = await _get_client_telegram_id_from_order(order_id)
-            if client_tg_id:
-                await _notifier.order_confirmed(order_id, client_tg_id)
+        # Уведомить клиента и пчеловода о смене статуса
+        await _notify_status_change(order_id, new_status)
 
     except IntegramError as e:
         await callback.answer(f"Ошибка: {e}", show_alert=True)
@@ -532,3 +531,38 @@ async def _get_client_telegram_id_from_order(order_id: int) -> Optional[int]:
         return await _get_client_telegram_id(order.client_id)
     except Exception:
         return None
+
+
+async def _notify_status_change(order_id: int, new_status: str) -> None:
+    """Уведомить клиента и пчеловода о смене статуса заказа.
+
+    Использует httpx-функции из src.web.notifications, которые покрывают
+    все статусы жизненного цикла заказа.
+    """
+    if not _crm:
+        return
+    try:
+        order = await _crm.get_order(order_id)
+        order_number = order.number or str(order_id)
+        client_name = getattr(order, "client_name", "") or ""
+        tracking = getattr(order, "tracking_number", None)
+
+        # Уведомить клиента
+        tg_id = await _get_client_telegram_id(order.client_id)
+        if tg_id:
+            await notify_client_status_change(
+                telegram_id=tg_id,
+                order_number=order_number,
+                new_status=new_status,
+                tracking_number=tracking,
+            )
+
+        # Уведомить пчеловода
+        await notify_beekeeper_status_change(
+            order_number=order_number,
+            new_status=new_status,
+            client_name=client_name,
+            tracking_number=tracking,
+        )
+    except Exception as e:
+        logger.warning("Ошибка уведомления при смене статуса #%d → %s: %s", order_id, new_status, e)

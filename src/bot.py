@@ -56,11 +56,6 @@ _user_styles: dict[int, str] = {}
 # Пользователи в режиме «Ассистент пчеловода»
 _admin_mode_users: set[int] = set()
 
-admin_chat_agent = AdminChatAgent(
-    groq_client=orchestrator._groq,
-    model=orchestrator._model,
-)
-
 bot = Bot(token=TELEGRAM_BOT_TOKEN)  # может быть переопределён в main() с прокси
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -74,6 +69,10 @@ analyst = AnalystAgent(
     groq_model=orchestrator._model,
 )
 inspector = InspectorAgent()  # KB будет подключена в main() после load_kb()
+admin_chat_agent = AdminChatAgent(
+    groq_client=orchestrator._groq,
+    model=orchestrator._model,
+)
 
 # setup_admin() вызывается в main() — один раз, после подключения CRM
 

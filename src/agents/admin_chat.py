@@ -99,16 +99,17 @@ class AdminChatAgent:
             valid = [o for o in orders if _valid_date(o)]
             recent = list(reversed(valid[-10:])) if valid else []
 
-            # Позиции всех заказов (bulk-запрос)
-            items_by_order: dict[int, list] = defaultdict(list)
-            try:
-                all_items = await self._crm.get_order_items_bulk()
-                for item in all_items:
-                    items_by_order[item.order_id].append(item)
-            except Exception:
-                pass
-
             if recent:
+                # Загружаем позиции для каждого из 10 последних заказов параллельно
+                async def _safe_items(order_id: int):
+                    try:
+                        return await self._crm.get_order_items(order_id)
+                    except Exception:
+                        return []
+
+                items_lists = await asyncio.gather(*[_safe_items(o.id) for o in recent])
+                items_by_order = {o.id: items for o, items in zip(recent, items_lists)}
+
                 lines.append("Последние 10 заказов (номер | дата | статус | сумма | товары):")
                 for o in recent:
                     try:
@@ -122,19 +123,21 @@ class AdminChatAgent:
                     ) if order_items else "—"
                     lines.append(f"  #{o.number} | {date_str} | {o.status} | {o.total or 0:.0f} ₽ | {items_str}")
 
-            # Топ-10 товаров по количеству заказов
-            if items_by_order:
+            # Топ-10 товаров по количеству (bulk-запрос всех позиций)
+            try:
                 from collections import Counter
+                all_items = await self._crm.get_order_items_bulk()
                 product_counts: Counter = Counter()
-                for item_list in items_by_order.values():
-                    for item in item_list:
-                        name = item.product_name or "неизвестно"
-                        product_counts[name] += item.quantity
+                for item in all_items:
+                    name = item.product_name or "неизвестно"
+                    product_counts[name] += item.quantity
                 top = product_counts.most_common(10)
                 if top:
                     lines.append("Топ-10 товаров по суммарному количеству в заказах:")
                     for name, qty in top:
                         lines.append(f"  {name}: {qty} шт.")
+            except Exception:
+                pass
         except Exception as e:
             lines.append(f"Ошибка загрузки заказов: {e}")
 

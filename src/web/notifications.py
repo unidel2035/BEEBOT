@@ -16,7 +16,16 @@ logger = logging.getLogger(__name__)
 
 _BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _BEEKEEPER_CHAT_ID = os.getenv("BEEKEEPER_CHAT_ID", "")
+_TG_SOCKS_PROXY = os.getenv("TG_SOCKS_PROXY", "")
 _TG_API = "https://api.telegram.org"
+
+
+def _make_client() -> httpx.AsyncClient:
+    """HTTP-клиент с SOCKS5-прокси если задан TG_SOCKS_PROXY."""
+    return httpx.AsyncClient(
+        timeout=10.0,
+        proxy=_TG_SOCKS_PROXY if _TG_SOCKS_PROXY else None,
+    )
 
 
 # Шаблоны сообщений по статусам
@@ -70,7 +79,7 @@ async def notify_client_status_change(
     text = template.format(number=order_number, tracking=tracking)
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with _make_client() as client:
             resp = await client.post(
                 f"{_TG_API}/bot{_BOT_TOKEN}/sendMessage",
                 json={
@@ -125,7 +134,7 @@ async def notify_beekeeper_status_change(
         text += f"\nКлиент: {client_name}"
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with _make_client() as client:
             resp = await client.post(
                 f"{_TG_API}/bot{_BOT_TOKEN}/sendMessage",
                 json={
@@ -160,7 +169,7 @@ async def notify_client_tracking(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with _make_client() as client:
             resp = await client.post(
                 f"{_TG_API}/bot{_BOT_TOKEN}/sendMessage",
                 json={

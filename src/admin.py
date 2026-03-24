@@ -23,6 +23,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from src.config import ADMIN_CHAT_ID, BEEKEEPER_CHAT_ID
 from src.integram_client import IntegramClient, IntegramError, IntegramNotFoundError
 from src.knowledge_base import KnowledgeBase
+from src.memory import UserMemory
 from src.notifications import Notifier
 from src.web.notifications import notify_client_status_change, notify_beekeeper_status_change
 
@@ -38,15 +39,22 @@ _crm: Optional[IntegramClient] = None
 _notifier: Optional[Notifier] = None
 _bot: Optional[Bot] = None
 _kb: Optional[KnowledgeBase] = None
+_mem: Optional[UserMemory] = None
 
 
-def setup_admin(bot: Bot, crm: Optional[IntegramClient] = None, kb: Optional[KnowledgeBase] = None) -> None:
+def setup_admin(
+    bot: Bot,
+    crm: Optional[IntegramClient] = None,
+    kb: Optional[KnowledgeBase] = None,
+    memory: Optional[UserMemory] = None,
+) -> None:
     """Инициализировать админ-модуль с зависимостями."""
-    global _crm, _notifier, _bot, _kb
+    global _crm, _notifier, _bot, _kb, _mem
     _bot = bot
     _crm = crm
     _notifier = Notifier(bot)
     _kb = kb
+    _mem = memory
 
 
 def _is_admin(user_id: int) -> bool:
@@ -431,6 +439,84 @@ async def cmd_teach(message: types.Message) -> None:
     except Exception as e:
         logger.error("Ошибка /teach: %s", e)
         await message.answer(f"❌ Ошибка при добавлении знания: {e}")
+
+
+# ---------------------------------------------------------------------------
+# /remember <telegram_id> <факт> — добавить/посмотреть/удалить факт о пользователе
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("remember", ignore_mention=True))
+async def cmd_remember(message: types.Message) -> None:
+    """Управление долгосрочной памятью пользователей.
+
+    Использование:
+      /remember <telegram_id> <факт>    — добавить факт
+      /remember <telegram_id>           — показать все факты
+      /remember <telegram_id> clear     — удалить все факты
+    """
+    if not _is_admin(message.from_user.id):
+        await message.answer("Команда доступна только администратору.")
+        return
+
+    if _mem is None:
+        await message.answer("Модуль памяти не инициализирован.")
+        return
+
+    args = (message.text or "").strip()
+    for prefix in ("/remember@", "/remember"):
+        if args.lower().startswith(prefix.lower()):
+            args = args[len(prefix):].strip()
+            break
+
+    if not args:
+        await message.answer(
+            "Использование:\n"
+            "/remember <telegram_id> <факт> — добавить факт\n"
+            "/remember <telegram_id> — показать все факты\n"
+            "/remember <telegram_id> clear — удалить все факты\n\n"
+            "Пример: /remember 123456789 язва желудка, интересуется пергой"
+        )
+        return
+
+    parts = args.split(maxsplit=1)
+    try:
+        tg_id = int(parts[0])
+    except ValueError:
+        await message.answer("Первый аргумент — Telegram ID (число).")
+        return
+
+    # Только ID → показать факты
+    if len(parts) == 1:
+        facts = _mem.get_facts(tg_id)
+        if not facts:
+            await message.answer(f"О пользователе {tg_id} ничего не сохранено.")
+        else:
+            lines = [f"🧠 Память о пользователе `{tg_id}` ({len(facts)} фактов):\n"]
+            for i, f in enumerate(facts, 1):
+                lines.append(f"{i}. {f}")
+            await message.answer("\n".join(lines), parse_mode="Markdown")
+        return
+
+    fact_text = parts[1].strip()
+
+    # clear → удалить все факты
+    if fact_text.lower() == "clear":
+        count = _mem.clear_facts(tg_id)
+        await message.answer(f"🗑 Удалено {count} фактов о пользователе {tg_id}.")
+        return
+
+    # Добавить факт
+    added = _mem.add_fact(tg_id, fact_text, category="general", source="admin")
+    if added:
+        total = _mem.count_facts(tg_id)
+        await message.answer(
+            f"✅ Факт добавлен для пользователя `{tg_id}`.\n"
+            f"Всего фактов: {total}",
+            parse_mode="Markdown",
+        )
+    else:
+        await message.answer("Этот факт уже сохранён.")
 
 
 # ---------------------------------------------------------------------------

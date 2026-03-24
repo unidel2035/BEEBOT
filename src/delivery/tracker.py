@@ -23,7 +23,7 @@ from src.delivery.calculator import DeliveryCalculator
 
 logger = logging.getLogger(__name__)
 
-_WEB_INTERNAL_URL = os.getenv("WEB_INTERNAL_URL", "http://localhost:8080")
+_WEB_INTERNAL_URL = os.getenv("WEB_INTERNAL_URL", "http://localhost:8088")
 _WEB_INTERNAL_SECRET = os.getenv("WEB_INTERNAL_SECRET", "")
 
 

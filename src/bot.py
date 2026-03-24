@@ -41,6 +41,7 @@ from src.agents.inspector import (
     InspectFSM,
     INSPECT_TIMEOUT_SECONDS,
 )
+from src.agents.admin_chat import AdminChatAgent
 from src.orchestrator import Orchestrator
 from src.agents.analyst import AnalystAgent
 from src.admin import router as admin_router, setup_admin
@@ -51,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 # «Голос Улья» — стиль ответов, выбранный пользователем (user_id → style_id)
 _user_styles: dict[int, str] = {}
+
+# Пользователи в режиме «Ассистент пчеловода»
+_admin_mode_users: set[int] = set()
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)  # может быть переопределён в main() с прокси
 dp = Dispatcher(storage=MemoryStorage())
@@ -65,6 +69,10 @@ analyst = AnalystAgent(
     groq_model=orchestrator._model,
 )
 inspector = InspectorAgent()  # KB будет подключена в main() после load_kb()
+admin_chat_agent = AdminChatAgent(
+    groq_client=orchestrator._groq,
+    model=orchestrator._model,
+)
 
 # setup_admin() вызывается в main() — один раз, после подключения CRM
 
@@ -101,6 +109,7 @@ HELP_MESSAGE = """Как пользоваться ботом:
 /order — оформить заказ
 /voice — сменить стиль ответов (Голос Улья)
 /inspect — персональная консультация (Осмотр улья)
+/admin — включить/выключить режим «Ассистент пчеловода» (админ)
 /faq — топ частых вопросов (админ)
 /yt_check — проверить новые видео на канале (админ)
 /yt_update — обновить базу знаний из YouTube (админ)
@@ -222,6 +231,37 @@ async def cmd_voice(message: types.Message):
         parse_mode="Markdown",
         reply_markup=_build_voice_keyboard(current),
     )
+
+
+@dp.message(Command("admin"))
+async def cmd_admin_mode(message: types.Message):
+    """Переключить режим «Ассистент пчеловода» (только ADMIN_CHAT_ID)."""
+    if ADMIN_CHAT_ID is None or message.from_user.id != ADMIN_CHAT_ID:
+        await message.answer("⛔ Команда доступна только администратору.")
+        return
+
+    user_id = message.from_user.id
+    if user_id in _admin_mode_users:
+        _admin_mode_users.discard(user_id)
+        admin_chat_agent.clear_history(user_id)
+        await message.answer(
+            "🐝 Режим *Ассистент* выключен.\n"
+            "Снова работаю как бот для подписчиков.",
+            parse_mode="Markdown",
+        )
+    else:
+        _admin_mode_users.add(user_id)
+        await message.answer(
+            "🤖 *Режим: Ассистент пчеловода*\n\n"
+            "Теперь я твой личный помощник с доступом к CRM.\n"
+            "Спрашивай что угодно:\n\n"
+            "• _Сколько заказов за этот месяц?_\n"
+            "• _Какие товары нужно срочно пополнить?_\n"
+            "• _Напиши ответ клиенту на жалобу о задержке_\n"
+            "• _Топ продуктов за всё время_\n\n"
+            "/admin — выключить режим и очистить историю",
+            parse_mode="Markdown",
+        )
 
 
 @dp.callback_query(F.data.startswith("voice_style:"))
@@ -577,6 +617,17 @@ async def handle_question(message: types.Message, state: FSMContext):
     query = (message.text or "").replace(f"@{BOT_USERNAME}", "").strip()
     if len(query) < 3:
         await message.reply("Напиши вопрос подлиннее, чтобы я мог помочь.")
+        return
+
+    # Режим «Ассистент пчеловода» — прямой LLM-диалог с CRM-контекстом
+    if ADMIN_CHAT_ID and message.from_user.id == ADMIN_CHAT_ID and message.from_user.id in _admin_mode_users:
+        await bot.send_chat_action(message.chat.id, "typing")
+        try:
+            response = await admin_chat_agent.chat(message.from_user.id, query)
+            await message.reply(response, parse_mode="Markdown")
+        except Exception as e:
+            logger.error("AdminChat error: %s", e)
+            await message.reply("Не удалось получить ответ. Попробуй ещё раз.")
         return
 
     if is_products_query(query):
@@ -1262,8 +1313,11 @@ async def main():
     else:
         logger.info("Integram CRM не настроена — агенты работают без CRM.")
 
+    # Инициализировать AdminChatAgent с CRM-клиентом
+    admin_chat_agent.set_crm(integram_client)
+
     # Инициализировать админ-модуль (один раз, с CRM если доступна)
-    setup_admin(bot, crm=integram_client, kb=kb)
+    setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory)
 
     # --- Авто-трекинг: фоновая проверка статуса отправлений ---
     order_tracker: Optional[OrderTracker] = None

@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir \
     python-multipart==0.0.20 \
     "python-jose[cryptography]==3.3.0" \
     httpx==0.28.1 \
+    socksio==1.0.0 \
     pydantic==2.11.1 \
     python-dotenv==1.2.2 \
     "bcrypt>=4.0,<6.0" \
@@ -39,4 +40,4 @@ COPY src/ src/
 COPY --from=frontend-build /app/web/dist /app/web/dist
 
 # Serve static files + API
-CMD ["uvicorn", "src.web.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "src.web.server:app", "--host", "0.0.0.0", "--port", "8088"]

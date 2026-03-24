@@ -16,7 +16,8 @@
 - **Тексты** — 21 файл (очищенные выдержки)
 - **Субтитры YouTube** — расшифровки 26 видео с канала @a.dmitrov
 - **Гибридный поиск** — 70% семантика + 30% стилометрия + keyword-буст
-- ⚠️ В индексе сейчас **240 чанков** (нужна пересборка: `docker exec beebot python -m src.build_kb`)
+- **Динамический keyword-буст** — ключи из CRM-товаров обновляются при старте
+- В индексе **240 чанков** (20 текстовых файлов + 26 YouTube-субтитров; PDFs перекрыты текстами)
 
 ### 2. Telegram-бот
 - `/start`, `/products`, `/ask`, `/help` — базовые команды
@@ -24,6 +25,11 @@
 - `/inspect` — «Осмотр улья»: диагностический диалог, 3 вопроса → рекомендация
 - `/voice` — выбор «Голоса Улья» (5 стилей: основатель, наставник, краевед, учёный, молодой)
 - `/cancel` — прервать диалог заказа
+- `/admin` — режим личного ассистента пчеловода (только ADMIN_CHAT_ID)
+- `/stats [запрос]` — аналитика продаж (только ADMIN_CHAT_ID)
+- `/faq` — топ частых вопросов пользователей (только ADMIN_CHAT_ID)
+- `/yt_check` — проверить наличие новых видео на YouTube-канале (только ADMIN_CHAT_ID)
+- `/yt_update` — скачать субтитры новых видео и пересобрать KB (только ADMIN_CHAT_ID)
 - Работа в группах (@mention или reply)
 - История диалога (5 пар сообщений, TTL 30 мин)
 - Контекстные кнопки после ответа (PDF-инструкция + «Все продукты»)
@@ -32,8 +38,9 @@
 - **Оркестратор** — классифицирует интент: consult / order / delivery / status / edit / greeting
 - **Консультант** — FAISS-поиск → LLM-ответ в стиле автора
 - **Логист** — 7-шаговый FSM: товары → ФИО → телефон → адрес → доставка → подтверждение → CRM
-- **Аналитик** — статистика продаж, топ товаров (только ADMIN_CHAT_ID)
+- **Аналитик** — статистика продаж: заказы/выручка/топ/фасовка/клиенты/доставка/источники/ABC/сезонность/прогноз (только ADMIN_CHAT_ID)
 - **Инспектор** — «Осмотр улья», использует KB без CRM
+- **Ассистент** (AdminChatAgent) — /admin: LLM-диалог с пчеловодом + полный CRM-снимок (только ADMIN_CHAT_ID)
 
 ### 4. Веб-панель (PWA)
 - **Дашборд** — 6 карточек + 4 графика (выручка, заказы, статусы, доставка)
@@ -93,13 +100,15 @@ BEEBOT/
 │   ├── agents/
 │   │   ├── beebot.py           # Консультант: FAISS → LLM
 │   │   ├── logist.py           # Логист: FSM 7 шагов → заказ в CRM
-│   │   ├── analyst.py          # Аналитик: статистика из CRM
-│   │   └── inspector.py        # Инспектор: «Осмотр улья»
-│   ├── knowledge_base.py       # FAISS + стилометрия + keyword-буст
+│   │   ├── analyst.py          # Аналитик: статистика + ABC + сезонность + прогноз
+│   │   ├── inspector.py        # Инспектор: «Осмотр улья»
+│   │   └── admin_chat.py       # Ассистент пчеловода: /admin + CRM-снимок
+│   ├── knowledge_base.py       # FAISS + стилометрия + динамический keyword-буст
+│   ├── youtube_updater.py      # Автообновление KB из YouTube (/yt_check, /yt_update)
 │   ├── llm_client.py           # Groq API (retry + Голос Улья)
 │   ├── integram_api.py         # CRM HTTP-клиент низкоуровневый (auto re-auth)
 │   ├── integram_client.py      # CRM обёртка высокоуровневая (Pydantic-модели)
-│   ├── admin.py                # Админ-команды (/orders, /status, /track, /clients, /stock)
+│   ├── admin.py                # Админ-команды (/orders, /status, /track, /clients, /stock, /teach)
 │   ├── notifications.py        # Уведомления пчеловоду в Telegram
 │   ├── delivery/
 │   │   ├── calculator.py       # Калькулятор (СДЭК + Почта + самовывоз)
@@ -109,8 +118,17 @@ BEEBOT/
 │   ├── integrations/
 │   │   └── uds.py              # UDS: поллер + дедупликация → CRM + уведомления
 │   └── web/
-│       ├── api.py              # FastAPI: JWT, CRUD, пагинация, SSE, CSV, healthcheck
-│       ├── notifications.py    # Уведомления клиентам при смене статуса
+│       ├── api.py              # FastAPI: main router + startup + зависимости (167 строк)
+│       ├── routers/            # Маршруты по модулям
+│       │   ├── auth.py         # /api/login, /api/users
+│       │   ├── orders.py       # /api/orders/*
+│       │   ├── clients.py      # /api/clients/*
+│       │   ├── products.py     # /api/products/*
+│       │   ├── dashboard.py    # /api/dashboard/*
+│       │   ├── export.py       # CSV-экспорт
+│       │   ├── users.py        # Управление пользователями
+│       │   └── sse.py          # SSE events
+│       ├── notifications.py    # Уведомления клиентам + notify_beekeeper_status_change
 │       ├── users.py            # Управление пользователями веб-панели
 │       └── server.py           # Статика + PWA root files
 ├── web/                        # Frontend (Vue 3 + PrimeVue 4, PWA)
@@ -157,8 +175,9 @@ Telegram-бот
   → Оркестратор (LangGraph) → classify intent
   → Консультант → FAISS → LLM
   → Логист     → FSM → Integram CRM
-  → Аналитик   → Integram CRM → отчёты
+  → Аналитик   → Integram CRM → отчёты (ABC/сезонность/прогноз)
   → Инспектор  → FAISS → LLM
+  → Ассистент  → Integram CRM-снимок → LLM (только /admin)
 
 LLM-цепочка:
   beebot → localhost:8990 → SSH-туннель → hive:8990 → groq-proxy → api.groq.com
@@ -198,7 +217,7 @@ ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT && git pull"
 # Редеплой с пересборкой (при изменении кода)
 ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT && git pull && docker compose up -d --build"
 
-# Пересобрать базу знаний (нужно: 240 чанков → 410+)
+# Пересобрать базу знаний (240 чанков)
 ssh ai-agent@185.233.200.13 "docker exec beebot python -m src.build_kb"
 
 # Пересобрать только веб-панель
@@ -224,17 +243,15 @@ gh pr merge <N> --repo alekseymavai/BEEBOT --squash
 ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT && git pull origin main"
 ```
 
-## Известные проблемы (актуально на 21.03.2026)
+## Известные проблемы (актуально на 24.03.2026)
 
 Полный анализ: [analysis.md](analysis.md)
 
 ### P1 — требуют внимания
-- **Уведомления не синхронизированы** — смена статуса через веб не уведомляет пчеловода в TG
-- **KB устарела** — 240 чанков вместо 410+, нужна пересборка
+- **KB пересобрана** — 240 чанков (20 txt + 26 YouTube); для роста нужны новые источники
 
 ### P2 — технический долг
-- **Монолитный api.py** — 1242 строки, нужно разбить на модули
-- **Пагинация фронтенда** — `per_page=1000` вместо серверной пагинации
+- **Пагинация фронтенда** — `per_page=1000` вместо серверной пагинации (web/src/api.js:79,139,154)
 - **Константы в 3 файлах** — crm_constants.py + crm_schema.py + integram_api.py
 
 ### Инфраструктурные ограничения
@@ -249,7 +266,7 @@ ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT && git pull origin main"
 
 | Документ | Описание |
 |----------|----------|
-| [analysis.md](analysis.md) | Анализ 21.03.2026: сильные/слабые стороны, конфликты логик, инфраструктура |
+| [analysis.md](analysis.md) | Анализ 24.03.2026: сильные/слабые стороны, конфликты логик, инфраструктура |
 | [plan.md](plan.md) | Фазы 3–5: Claude API, долгосрочная память, AgentBus, масштабирование |
 | [docs/architecture.md](docs/architecture.md) | Блок-схемы всех подсистем, сравнительные таблицы |
 | [README.md](README.md) | Обзор проекта (RU + EN) |

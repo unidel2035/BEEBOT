@@ -65,3 +65,6 @@ YOUTUBE_CHANNEL_HANDLE = os.getenv("YOUTUBE_CHANNEL_HANDLE", "@a.dmitrov")
 # Bot settings
 MAX_CONTEXT_CHUNKS = int(os.getenv("MAX_CONTEXT_CHUNKS", "5"))
 MAX_RESPONSE_LENGTH = int(os.getenv("MAX_RESPONSE_LENGTH", "4096"))
+
+# Долгосрочная память (SQLite)
+MEMORY_DB_PATH = DATA_DIR / "memory.db"

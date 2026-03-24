@@ -99,7 +99,7 @@ class TestOrchestratorRouting:
         with patch("src.orchestrator._classify_intent", return_value="consult"):
             response, chunks = await orch.route(1001, "Как принимать прополис?")
 
-        orch._beebot.answer.assert_called_once_with("Как принимать прополис?", history=[], style=None)
+        orch._beebot.answer.assert_called_once_with("Как принимать прополис?", history=[], style=None, memory_facts=None)
         assert response == "Ответ о прополисе"
         assert chunks == [{"source": "pdf:X"}]
 

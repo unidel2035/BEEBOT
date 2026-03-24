@@ -80,8 +80,14 @@ class BeebotAgent:
         query: str,
         history: list[dict] | None = None,
         style: str | None = None,
+        memory_facts: list[str] | None = None,
     ) -> tuple[str, list[dict]]:
         """Ответить на вопрос. Возвращает (ответ, список чанков)."""
         chunks = self.kb.search(query)
-        response = self.llm.generate(query, chunks, history=history, style=style)
+        response = self.llm.generate(
+            query, chunks,
+            history=history,
+            style=style,
+            memory_facts=memory_facts,
+        )
         return response, chunks

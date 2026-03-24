@@ -1317,7 +1317,7 @@ async def main():
     admin_chat_agent.set_crm(integram_client)
 
     # Инициализировать админ-модуль (один раз, с CRM если доступна)
-    setup_admin(bot, crm=integram_client, kb=kb)
+    setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory)
 
     # --- Авто-трекинг: фоновая проверка статуса отправлений ---
     order_tracker: Optional[OrderTracker] = None

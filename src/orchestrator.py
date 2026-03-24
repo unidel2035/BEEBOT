@@ -22,10 +22,11 @@ from groq import Groq
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 
-from src.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, PROCESSED_DIR
+from src.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, PROCESSED_DIR, MEMORY_DB_PATH
 from src.agents.beebot import BeebotAgent
 from src.agents.logist import LogistAgent
 from src.agents.analyst import AnalystAgent
+from src.memory import UserMemory, extract_fact
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,9 @@ class Orchestrator:
         self._logist = LogistAgent()
         self._analyst = AnalystAgent(groq_client=self._groq, groq_model=self._model)
 
+        # Долгосрочная память пользователей (SQLite)
+        self._memory = UserMemory(MEMORY_DB_PATH)
+
         # In-memory dialog state per user_id
         self._dialog_states: dict[int, DialogState] = {}
         # Conversation history per user_id (last N messages)
@@ -319,11 +323,25 @@ class Orchestrator:
 
     def _node_beebot(self, state: OrchestratorState) -> OrchestratorState:
         """Маршрут: consult → BEEBOT-консультант."""
+        user_id = state["user_id"]
+        query = state["query"]
+
+        # Загрузить долгосрочную память пользователя
+        memory_facts = self._memory.get_facts(user_id) or None
+
         response, chunks = self._beebot.answer(
-            state["query"],
+            query,
             history=state.get("history"),
             style=state.get("style"),
+            memory_facts=memory_facts,
         )
+
+        # Авто-сохранить факт если пользователь упомянул здоровье/интерес
+        fact_result = extract_fact(query)
+        if fact_result:
+            fact_text, category = fact_result
+            self._memory.add_fact(user_id, fact_text, category=category, source="auto")
+
         return {**state, "response": response, "chunks": chunks}
 
     async def _node_logist(self, state: OrchestratorState) -> OrchestratorState:

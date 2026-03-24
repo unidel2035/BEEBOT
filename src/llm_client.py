@@ -89,7 +89,11 @@ VOICE_STYLES: dict[str, dict] = {
 DEFAULT_VOICE = "наставник"
 
 
-def build_prompt(query: str, context_chunks: list[dict]) -> str:
+def build_prompt(
+    query: str,
+    context_chunks: list[dict],
+    memory_facts: list[str] | None = None,
+) -> str:
     """Build the user prompt with context from knowledge base."""
     context_parts = []
     for chunk in context_chunks:
@@ -98,10 +102,15 @@ def build_prompt(query: str, context_chunks: list[dict]) -> str:
 
     context_text = "\n\n---\n\n".join(context_parts)
 
+    memory_section = ""
+    if memory_facts:
+        facts_text = "\n".join(f"- {f}" for f in memory_facts)
+        memory_section = f"\n\nЧто я уже знаю об этом человеке:\n{facts_text}\n"
+
     return f"""Контекст из моих видео и инструкций:
 
 {context_text}
-
+{memory_section}
 ---
 
 Вопрос подписчика: {query}
@@ -125,6 +134,7 @@ class LLMClient:
         context_chunks: list[dict],
         history: list[dict] | None = None,
         style: str | None = None,
+        memory_facts: list[str] | None = None,
     ) -> str:
         """Generate a response for the user's query with context.
 
@@ -134,7 +144,7 @@ class LLMClient:
             history: Список предыдущих сообщений [{role, content}, ...].
             style: ID стиля «Голос Улья» (ключ из VOICE_STYLES).
         """
-        user_prompt = build_prompt(query, context_chunks)
+        user_prompt = build_prompt(query, context_chunks, memory_facts=memory_facts)
 
         system = SYSTEM_PROMPT
         if style and style in VOICE_STYLES:

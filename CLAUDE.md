@@ -108,7 +108,7 @@ BEEBOT/
 │   ├── llm_client.py           # Groq API (retry + Голос Улья)
 │   ├── integram_api.py         # CRM HTTP-клиент низкоуровневый (auto re-auth)
 │   ├── integram_client.py      # CRM обёртка высокоуровневая (Pydantic-модели)
-│   ├── admin.py                # Админ-команды (/orders, /status, /track, /clients, /stock)
+│   ├── admin.py                # Админ-команды (/orders, /status, /track, /clients, /stock, /teach)
 │   ├── notifications.py        # Уведомления пчеловоду в Telegram
 │   ├── delivery/
 │   │   ├── calculator.py       # Калькулятор (СДЭК + Почта + самовывоз)
@@ -118,8 +118,17 @@ BEEBOT/
 │   ├── integrations/
 │   │   └── uds.py              # UDS: поллер + дедупликация → CRM + уведомления
 │   └── web/
-│       ├── api.py              # FastAPI: JWT, CRUD, пагинация, SSE, CSV, healthcheck
-│       ├── notifications.py    # Уведомления клиентам при смене статуса
+│       ├── api.py              # FastAPI: main router + startup + зависимости (167 строк)
+│       ├── routers/            # Маршруты по модулям
+│       │   ├── auth.py         # /api/login, /api/users
+│       │   ├── orders.py       # /api/orders/*
+│       │   ├── clients.py      # /api/clients/*
+│       │   ├── products.py     # /api/products/*
+│       │   ├── dashboard.py    # /api/dashboard/*
+│       │   ├── export.py       # CSV-экспорт
+│       │   ├── users.py        # Управление пользователями
+│       │   └── sse.py          # SSE events
+│       ├── notifications.py    # Уведомления клиентам + notify_beekeeper_status_change
 │       ├── users.py            # Управление пользователями веб-панели
 │       └── server.py           # Статика + PWA root files
 ├── web/                        # Frontend (Vue 3 + PrimeVue 4, PWA)
@@ -239,12 +248,10 @@ ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT && git pull origin main"
 Полный анализ: [analysis.md](analysis.md)
 
 ### P1 — требуют внимания
-- **Уведомления частично синхронизированы** — смена статуса через TG `/status` не уведомляет пчеловода и не посылает SSE (веб-путь ✅ исправлен)
 - **KB устарела** — 251 чанк вместо 410+, нужна пересборка
 
 ### P2 — технический долг
-- **Монолитный api.py** — 1384 строки, нужно разбить на модули
-- **Пагинация фронтенда** — `per_page=1000` вместо серверной пагинации
+- **Пагинация фронтенда** — `per_page=1000` вместо серверной пагинации (web/src/api.js:79,139,154)
 - **Константы в 3 файлах** — crm_constants.py + crm_schema.py + integram_api.py
 
 ### Инфраструктурные ограничения

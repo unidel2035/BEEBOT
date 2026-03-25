@@ -40,7 +40,8 @@ from src.crm_constants import (  # noqa: F401 — re-export для обратн�
     REQ_PRODUCT_SKU, REQ_PRODUCT_CATEGORY, REQ_PRODUCT_SHORT, REQ_PRODUCT_STOCK,
     REQ_USER_PASSWORD_HASH, REQ_USER_ROLE_OLD, REQ_USER_ROLE,
     REQ_USER_DISPLAY_NAME, REQ_USER_ACTIVE,
-    REQ_ORDER_CDEK_CONFIRMED, REQ_ORDER_CLIENT_NOTIFIED, REQ_ORDER_STOCK_CHECKED,
+    REQ_ORDER_BATCH, REQ_ORDER_CDEK_CONFIRMED, REQ_ORDER_CLIENT_NOTIFIED, REQ_ORDER_STOCK_CHECKED,
+    TABLE_BATCHES, REQ_BATCH_DATE, REQ_BATCH_DELIVERY, REQ_BATCH_COUNT, REQ_BATCH_NOTE,
 )
 
 logger = logging.getLogger(__name__)
@@ -424,6 +425,7 @@ class IntegramAPI:
                 "tracking_number": _strip_html(r.get(REQ_ORDER_TRACKING, "")),
                 "comment": _strip_html(r.get(REQ_ORDER_COMMENT, "")),
                 "messenger": _strip_html(r.get(REQ_ORDER_MESSENGER, "")),
+                "batch_id": _extract_ref_id(r.get(REQ_ORDER_BATCH, "")) or None,
                 "cdek_confirmed": _strip_html(r.get(REQ_ORDER_CDEK_CONFIRMED, "")) not in ("", "0"),
                 "client_notified": _strip_html(r.get(REQ_ORDER_CLIENT_NOTIFIED, "")) not in ("", "0"),
                 "stock_checked": _strip_html(r.get(REQ_ORDER_STOCK_CHECKED, "")) not in ("", "0"),
@@ -468,6 +470,23 @@ class IntegramAPI:
                 "stock": _parse_number(r.get(REQ_PRODUCT_STOCK, "")),
             })
         return products
+
+    async def get_batches(self) -> list[dict[str, Any]]:
+        """Получить все партии отправки."""
+        raw = await self.get_all_objects(TABLE_BATCHES)
+        result = []
+        for obj in raw:
+            r = obj["reqs"]
+            result.append({
+                "id": obj["id"],
+                "name": obj["val"],
+                "date": _strip_html(r.get(REQ_BATCH_DATE, "")),
+                "delivery_method": _strip_html(r.get(REQ_BATCH_DELIVERY, "")),
+                "count": int(_strip_html(r.get(REQ_BATCH_COUNT, "0")) or 0),
+                "note": _strip_html(r.get(REQ_BATCH_NOTE, "")),
+            })
+        result.sort(key=lambda x: x.get("date", ""), reverse=True)
+        return result
 
     async def get_dashboard_stats(self) -> dict[str, Any]:
         """Статистика для дашборда."""

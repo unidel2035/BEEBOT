@@ -699,6 +699,53 @@ class IntegramClient:
         result.sort(key=lambda x: x.get("date", ""))
         return result
 
+    # ------------------------------------------------------------------
+    # Партии отправки
+    # ------------------------------------------------------------------
+
+    async def get_batches(self) -> list[dict]:
+        """Получить список партий отправки."""
+        return await self._api.get_batches()
+
+    async def create_batch(
+        self,
+        date: datetime,
+        delivery_method: str = "",
+        note: str = "",
+    ) -> int:
+        """Создать новую партию отправки. Возвращает ID партии."""
+        from src.crm_constants import (
+            TABLE_BATCHES, REQ_BATCH_DATE, REQ_BATCH_DELIVERY, REQ_BATCH_NOTE,
+        )
+        name = f"Партия {date.strftime('%d.%m.%Y')}"
+        if delivery_method:
+            name += f" — {delivery_method}"
+        reqs: dict[str, str] = {
+            REQ_BATCH_DATE: date.strftime("%d.%m.%Y 00:00:00"),
+        }
+        if delivery_method:
+            reqs[REQ_BATCH_DELIVERY] = delivery_method
+        if note:
+            reqs[REQ_BATCH_NOTE] = note
+        batch_id = await self._api.create_object(TABLE_BATCHES, name, reqs)
+        logger.info("Создана партия отправки '%s' (id=%d)", name, batch_id)
+        return batch_id
+
+    async def set_order_batch(self, order_id: int, batch_id: Optional[int]) -> None:
+        """Назначить или снять партию для заказа."""
+        from src.crm_constants import REQ_ORDER_BATCH
+        await self._api.set_requisites(
+            order_id, TABLE_ORDERS,
+            {REQ_ORDER_BATCH: str(batch_id) if batch_id else ""},
+        )
+
+    async def update_batch_count(self, batch_id: int) -> None:
+        """Пересчитать и сохранить кол-во заказов в партии."""
+        from src.crm_constants import TABLE_BATCHES, REQ_BATCH_COUNT
+        orders = await self._api.get_orders()
+        count = sum(1 for o in orders if o.get("batch_id") == batch_id)
+        await self._api.set_requisites(batch_id, TABLE_BATCHES, {REQ_BATCH_COUNT: str(count)})
+
     async def add_health_profile(
         self, telegram_id: int, fact: str, symptom_name: str = ""
     ) -> bool:
@@ -772,5 +819,6 @@ class IntegramClient:
             comment=item.get("comment"),
             messenger=item.get("messenger"),
             month=item.get("month"),
+            batch_id=item.get("batch_id"),
             items=[],
         )

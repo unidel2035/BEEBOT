@@ -21,6 +21,7 @@ TABLE_DELIVERY = 1021
 TABLE_USERS = 4964
 TABLE_STATUS_HISTORY = 6156
 TABLE_HEALTH_PROFILE = 6165
+TABLE_BATCHES = 6404          # Партии отправки
 
 # ---------------------------------------------------------------------------
 # Реквизиты заказов
@@ -40,6 +41,7 @@ REQ_ORDER_SOURCE = "1076"
 REQ_ORDER_MESSENGER = "1388"
 REQ_ORDER_SHIPPED_DATE = "6360"    # Дата отправки
 REQ_ORDER_DELIVERED_DATE = "6362"  # Дата доставки
+REQ_ORDER_BATCH = "6414"           # Партия отправки (REF → TABLE_BATCHES)
 REQ_ORDER_CDEK_CONFIRMED = "6416"  # Адрес СДЭК уточнён (bool)
 REQ_ORDER_CLIENT_NOTIFIED = "6418" # Клиент оповещён (bool)
 REQ_ORDER_STOCK_CHECKED = "6420"   # Наличие проверено (bool)
@@ -56,6 +58,12 @@ REQ_HEALTH_CLIENT = "6166"   # REF → Клиент
 REQ_HEALTH_SYMPTOM = "6167"  # REF → Симптомы (опционально)
 REQ_HEALTH_SOURCE = "6169"   # Текст факта (источник данных)
 REQ_HEALTH_DATE = "6171"     # Дата записи
+
+# Партии отправки
+REQ_BATCH_DATE = "6407"        # Дата партии (DATETIME)
+REQ_BATCH_DELIVERY = "6409"    # Способ доставки (SHORT — текст)
+REQ_BATCH_COUNT = "6411"       # Кол-во заказов (NUMBER)
+REQ_BATCH_NOTE = "6413"        # Примечание (CHARS)
 
 # ---------------------------------------------------------------------------
 # Реквизиты клиентов

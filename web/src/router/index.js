@@ -66,6 +66,12 @@ const routes = [
         meta: { roles: ['admin'] }
       },
       {
+        path: 'batches',
+        name: 'Batches',
+        component: () => import('../views/BatchesView.vue'),
+        meta: { roles: ['admin'] }
+      },
+      {
         path: 'packing',
         name: 'Packing',
         component: () => import('../views/PackingView.vue'),

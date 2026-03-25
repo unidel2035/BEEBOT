@@ -76,6 +76,7 @@ class Order(BaseModel):
     comment: Optional[str] = Field(default=None, alias="Комментарий")
     messenger: Optional[str] = Field(default=None, alias="Мессенджер")
     month: Optional[str] = Field(default=None, alias="Месяц")
+    batch_id: Optional[int] = Field(default=None, alias="Партия")
     items: list[OrderItem] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}

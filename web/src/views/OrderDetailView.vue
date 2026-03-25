@@ -36,6 +36,32 @@
         @change-status="handleChangeStatus"
       />
 
+      <!-- Партия отправки -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+        <h3 class="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+          <i class="pi pi-send text-gray-400" />
+          Партия отправки
+        </h3>
+        <div class="flex items-center gap-3">
+          <Select
+            v-model="selectedBatchId"
+            :options="batches"
+            option-label="label"
+            option-value="value"
+            placeholder="Не назначена"
+            class="w-64"
+            show-clear
+            @change="handleBatchChange"
+          />
+          <span v-if="batchSaving" class="text-sm text-gray-400">Сохранение...</span>
+          <RouterLink
+            v-if="selectedBatchId"
+            to="/batches"
+            class="text-sm text-amber-600 hover:text-amber-700"
+          >Все партии →</RouterLink>
+        </div>
+      </div>
+
       <!-- Чеклист подготовки к отправке -->
       <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
         <h3 class="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
@@ -109,11 +135,14 @@ import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
 import Button from 'primevue/button'
+import Select from 'primevue/select'
 import Skeleton from 'primevue/skeleton'
+import { RouterLink } from 'vue-router'
 import {
   getOrder, updateOrderStatus, updateOrderTracking, updateOrder,
   addOrderItem, updateOrderItem, deleteOrderItem,
-  getReference, getProducts, getOrderHistory, updateOrderChecklist
+  getReference, getProducts, getOrderHistory, updateOrderChecklist,
+  getBatches, assignOrderBatch
 } from '../api.js'
 import StatusBadge from '../components/StatusBadge.vue'
 import OrderDetailsCard from '../components/OrderDetailsCard.vue'
@@ -134,17 +163,27 @@ const savingTracking = ref(false)
 const deletingItem = ref(null)
 const history = ref([])
 const historyLoading = ref(false)
+const batches = ref([])
+const selectedBatchId = ref(null)
+const batchSaving = ref(false)
 
 onMounted(async () => {
-  const [orderData, refData, productsData] = await Promise.all([
+  const [orderData, refData, productsData, batchesData] = await Promise.all([
     getOrder(orderId),
     getReference(),
-    getProducts()
+    getProducts(),
+    getBatches()
   ])
   order.value = orderData
   statusOptions.value = refData.order_statuses
   deliveryMethods.value = refData.delivery_methods
   products.value = productsData
+  const batchList = batchesData.items ?? batchesData
+  batches.value = batchList.map(b => ({
+    value: b.id,
+    label: `${b.date ? b.date.slice(0, 10) : '?'} — ${b.delivery_method || 'без метода'}`
+  }))
+  selectedBatchId.value = orderData.batch_id ?? null
   loading.value = false
 
   historyLoading.value = true
@@ -159,6 +198,18 @@ onMounted(async () => {
 
 async function reloadOrder() {
   order.value = await getOrder(orderId)
+}
+
+async function handleBatchChange() {
+  batchSaving.value = true
+  try {
+    await assignOrderBatch(orderId, selectedBatchId.value || null)
+    toast.add({ severity: 'success', summary: 'Партия обновлена', life: 2000 })
+  } catch {
+    toast.add({ severity: 'error', summary: 'Ошибка', detail: 'Не удалось обновить партию', life: 3000 })
+  } finally {
+    batchSaving.value = false
+  }
 }
 
 function showSuccess(msg) {

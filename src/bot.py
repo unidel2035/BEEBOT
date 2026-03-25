@@ -1313,6 +1313,12 @@ async def main():
     else:
         logger.info("Integram CRM не настроена — агенты работают без CRM.")
 
+    # Загрузить онтологию Симптомы→Показания из Integram
+    try:
+        await orchestrator.load_ontology()
+    except Exception as _e:
+        logger.warning("Онтология недоступна (продолжаем без неё): %s", _e)
+
     # Инициализировать AdminChatAgent с CRM-клиентом
     admin_chat_agent.set_crm(integram_client)
 

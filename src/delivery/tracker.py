@@ -123,7 +123,11 @@ class OrderTracker:
                 order.number, order.tracking_number, provider,
             )
             try:
-                await self._crm.update_order_status(order.id, "Доставлен")
+                await self._crm.update_order_status(
+                    order.id, "Доставлен",
+                    from_status=order.status,
+                    comment=f"авто-трекер ({provider})",
+                )
             except Exception as e:
                 logger.error("Не удалось обновить статус заказа #%s: %s", order.number, e)
                 return

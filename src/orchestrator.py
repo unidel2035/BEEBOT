@@ -27,6 +27,7 @@ from src.agents.beebot import BeebotAgent
 from src.agents.logist import LogistAgent
 from src.agents.analyst import AnalystAgent
 from src.memory import UserMemory, extract_fact
+from src.ontology import OntologyCache
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,9 @@ class Orchestrator:
         # Долгосрочная память пользователей (SQLite)
         self._memory = UserMemory(MEMORY_DB_PATH)
 
+        # Онтология: Симптомы → Показания к применению (из Integram)
+        self._ontology = OntologyCache()
+
         # In-memory dialog state per user_id
         self._dialog_states: dict[int, DialogState] = {}
         # Conversation history per user_id (last N messages)
@@ -212,6 +216,10 @@ class Orchestrator:
     def load_kb(self):
         """Загрузить базу знаний BEEBOT (вызывается при старте бота)."""
         self._beebot.kb.load()
+
+    async def load_ontology(self) -> None:
+        """Загрузить онтологию Симптомы→Показания из Integram (при старте бота)."""
+        await self._ontology.load()
 
     async def route(
         self,
@@ -321,19 +329,28 @@ class Orchestrator:
             )
         return {**state, "intent": intent}
 
-    def _node_beebot(self, state: OrchestratorState) -> OrchestratorState:
+    async def _node_beebot(self, state: OrchestratorState) -> OrchestratorState:
         """Маршрут: consult → BEEBOT-консультант."""
         user_id = state["user_id"]
         query = state["query"]
 
-        # Загрузить долгосрочную память пользователя
-        memory_facts = self._memory.get_facts(user_id) or None
+        # Загрузить онтологию при первом обращении (lazy, async)
+        if not self._ontology.loaded:
+            await self._ontology.load()
+
+        # Долгосрочная память пользователя (SQLite)
+        memory_facts: list[str] = list(self._memory.get_facts(user_id))
+
+        # Онтологическая рекомендация по симптому (из Integram)
+        onto_hint = self._ontology.match(query)
+        if onto_hint:
+            memory_facts.insert(0, onto_hint)
 
         response, chunks = self._beebot.answer(
             query,
             history=state.get("history"),
             style=state.get("style"),
-            memory_facts=memory_facts,
+            memory_facts=memory_facts or None,
         )
 
         # Авто-сохранить факт если пользователь упомянул здоровье/интерес

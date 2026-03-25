@@ -36,6 +36,34 @@
         @change-status="handleChangeStatus"
       />
 
+      <!-- Чеклист подготовки к отправке -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+        <h3 class="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+          <i class="pi pi-check-square text-gray-400" />
+          Подготовка к отправке
+        </h3>
+        <div class="flex flex-wrap gap-4">
+          <label class="flex items-center gap-2 cursor-pointer text-sm text-gray-700">
+            <input type="checkbox" class="rounded"
+              :checked="order.stock_checked"
+              @change="handleChecklist('stock_checked', $event.target.checked)" />
+            Наличие проверено
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer text-sm text-gray-700">
+            <input type="checkbox" class="rounded"
+              :checked="order.cdek_confirmed"
+              @change="handleChecklist('cdek_confirmed', $event.target.checked)" />
+            Адрес СДЭК уточнён
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer text-sm text-gray-700">
+            <input type="checkbox" class="rounded"
+              :checked="order.client_notified"
+              @change="handleChecklist('client_notified', $event.target.checked)" />
+            Клиент оповещён
+          </label>
+        </div>
+      </div>
+
       <OrderItemsTable
         :items="order.items"
         :products="products"
@@ -45,6 +73,28 @@
         @remove-item="handleRemoveItem"
         @add-item="handleAddItem"
       />
+
+      <!-- История статусов -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4 flex items-center gap-2">
+          <i class="pi pi-history text-gray-400" />
+          История статусов
+        </h3>
+        <div v-if="historyLoading" class="text-sm text-gray-400">Загрузка...</div>
+        <div v-else-if="!history.length" class="text-sm text-gray-400">Нет записей</div>
+        <ol v-else class="relative border-l border-gray-200 ml-3">
+          <li v-for="item in history" :key="item.id" class="mb-4 ml-4">
+            <div class="absolute -left-1.5 mt-1.5 h-3 w-3 rounded-full border border-white bg-gray-300" />
+            <p class="text-xs text-gray-400">{{ item.date }}</p>
+            <p class="text-sm font-medium text-gray-700">
+              <span class="text-gray-400">{{ item.from_status }}</span>
+              <i class="pi pi-arrow-right text-xs mx-1 text-gray-400" />
+              <span class="text-gray-800">{{ item.to_status }}</span>
+            </p>
+            <p v-if="item.comment" class="text-xs text-gray-500 mt-0.5">{{ item.comment }}</p>
+          </li>
+        </ol>
+      </div>
     </div>
 
     <div v-else class="text-center py-16 text-gray-400">
@@ -63,7 +113,7 @@ import Skeleton from 'primevue/skeleton'
 import {
   getOrder, updateOrderStatus, updateOrderTracking, updateOrder,
   addOrderItem, updateOrderItem, deleteOrderItem,
-  getReference, getProducts
+  getReference, getProducts, getOrderHistory, updateOrderChecklist
 } from '../api.js'
 import StatusBadge from '../components/StatusBadge.vue'
 import OrderDetailsCard from '../components/OrderDetailsCard.vue'
@@ -82,6 +132,8 @@ const deliveryMethods = ref([])
 const products = ref([])
 const savingTracking = ref(false)
 const deletingItem = ref(null)
+const history = ref([])
+const historyLoading = ref(false)
 
 onMounted(async () => {
   const [orderData, refData, productsData] = await Promise.all([
@@ -94,6 +146,15 @@ onMounted(async () => {
   deliveryMethods.value = refData.delivery_methods
   products.value = productsData
   loading.value = false
+
+  historyLoading.value = true
+  try {
+    history.value = await getOrderHistory(orderId)
+  } catch (_) {
+    // история не критична
+  } finally {
+    historyLoading.value = false
+  }
 })
 
 async function reloadOrder() {
@@ -114,6 +175,8 @@ async function handleChangeStatus(newStatus) {
     order.value.status = newStatus
     order.value.editable = ['Новый', 'Подтверждён', 'В сборке'].includes(newStatus)
     showSuccess(`Статус изменён на "${newStatus}"`)
+    // Обновить историю после смены статуса
+    try { history.value = await getOrderHistory(orderId) } catch (_) {}
   } catch (e) {
     showError(e, 'Не удалось изменить статус')
   }
@@ -170,6 +233,15 @@ async function handleRemoveItem(item) {
     showError(e, 'Не удалось удалить')
   } finally {
     deletingItem.value = null
+  }
+}
+
+async function handleChecklist(field, value) {
+  try {
+    await updateOrderChecklist(orderId, { [field]: value })
+    order.value[field] = value
+  } catch (e) {
+    showError(e, 'Не удалось сохранить')
   }
 }
 

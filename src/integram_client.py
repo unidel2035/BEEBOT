@@ -699,6 +699,36 @@ class IntegramClient:
         result.sort(key=lambda x: x.get("date", ""))
         return result
 
+    async def add_health_profile(
+        self, telegram_id: int, fact: str, symptom_name: str = ""
+    ) -> bool:
+        """Создать запись в «Профиль здоровья» для клиента по telegram_id.
+
+        Returns:
+            True если запись создана, False если клиент не найден в CRM.
+        """
+        from src.crm_constants import (
+            TABLE_HEALTH_PROFILE, REQ_HEALTH_CLIENT, REQ_HEALTH_SOURCE, REQ_HEALTH_DATE,
+        )
+        # Найти client_id по telegram_id
+        clients = await self.get_clients()
+        client = next(
+            (c for c in clients if c.telegram_id and int(c.telegram_id) == telegram_id),
+            None,
+        )
+        if not client:
+            return False
+
+        reqs: dict[str, str] = {
+            REQ_HEALTH_CLIENT: str(client.id),
+            REQ_HEALTH_SOURCE: fact[:500],
+            REQ_HEALTH_DATE: datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+        }
+        name = f"{client.name or '?'}: {fact[:60]}"
+        await self._api.create_object(TABLE_HEALTH_PROFILE, name, reqs)
+        logger.info("Профиль здоровья: добавлен факт для клиента %d (tg=%d)", client.id, telegram_id)
+        return True
+
     async def get_client_telegram_id(self, client_id: int) -> Optional[int]:
         """Получить Telegram ID клиента по ID в CRM."""
         clients = await self.get_clients()

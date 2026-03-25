@@ -357,7 +357,15 @@ class Orchestrator:
         fact_result = extract_fact(query)
         if fact_result:
             fact_text, category = fact_result
-            self._memory.add_fact(user_id, fact_text, category=category, source="auto")
+            added = self._memory.add_fact(user_id, fact_text, category=category, source="auto")
+            # Дублировать health-факт в Integram «Профиль здоровья»
+            if added and category == "health" and user_id > 0:
+                try:
+                    from src.integram_client import IntegramClient
+                    async with IntegramClient() as crm:
+                        await crm.add_health_profile(user_id, fact_text)
+                except Exception as _e:
+                    logger.debug("Профиль здоровья: не удалось записать в Integram: %s", _e)
 
         return {**state, "response": response, "chunks": chunks}
 

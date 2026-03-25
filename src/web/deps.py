@@ -79,6 +79,12 @@ class OrderUpdate(BaseModel):
     comment: Optional[str] = None
 
 
+class ChecklistUpdate(BaseModel):
+    cdek_confirmed: Optional[bool] = None
+    client_notified: Optional[bool] = None
+    stock_checked: Optional[bool] = None
+
+
 class ItemCreate(BaseModel):
     product_id: int
     quantity: int = 1

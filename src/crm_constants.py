@@ -1,8 +1,103 @@
-"""Единые справочники Integram CRM (lookup ID → значение).
+"""Единые константы Integram CRM — ID таблиц, реквизитов и lookup-справочники.
 
-Все lookup-константы из CRM собраны здесь, чтобы не дублировать
-в integram_client.py, web/api.py и других модулях.
+Единый источник истины для всего кода, работающего с CRM.
+Импортировать отсюда, не из integram_api.py.
 """
+
+# ---------------------------------------------------------------------------
+# ID таблиц
+# ---------------------------------------------------------------------------
+
+TABLE_ORDERS = 1024
+TABLE_CLIENTS = 1023
+TABLE_PRODUCTS = 1022
+TABLE_ORDER_ITEMS = 1025
+TABLE_CATEGORIES = 1018
+TABLE_SOURCES = 1019
+TABLE_STATUSES = 1020
+TABLE_DELIVERY = 1021
+
+# Онтологические и операционные таблицы
+TABLE_USERS = 4964
+TABLE_STATUS_HISTORY = 6156
+
+# ---------------------------------------------------------------------------
+# Реквизиты заказов
+# ---------------------------------------------------------------------------
+
+REQ_ORDER_DATE = "1048"
+REQ_ORDER_ADDRESS = "1050"
+REQ_ORDER_DELIVERY_COST = "1052"
+REQ_ORDER_ITEMS_TOTAL = "1054"
+REQ_ORDER_TOTAL = "1056"
+REQ_ORDER_TRACKING = "1058"
+REQ_ORDER_COMMENT = "1059"
+REQ_ORDER_CLIENT = "1071"
+REQ_ORDER_STATUS = "1073"
+REQ_ORDER_DELIVERY_METHOD = "1075"
+REQ_ORDER_SOURCE = "1076"
+REQ_ORDER_MESSENGER = "1388"
+REQ_ORDER_SHIPPED_DATE = "6360"    # Дата отправки
+REQ_ORDER_DELIVERED_DATE = "6362"  # Дата доставки
+REQ_ORDER_CDEK_CONFIRMED = "6416"  # Адрес СДЭК уточнён (bool)
+REQ_ORDER_CLIENT_NOTIFIED = "6418" # Клиент оповещён (bool)
+REQ_ORDER_STOCK_CHECKED = "6420"   # Наличие проверено (bool)
+
+# История статусов
+REQ_HISTORY_ORDER = "6157"
+REQ_HISTORY_STATUS_FROM = "6158"
+REQ_HISTORY_STATUS_TO = "6160"
+REQ_HISTORY_DATE = "6162"
+REQ_HISTORY_COMMENT = "6164"
+
+# ---------------------------------------------------------------------------
+# Реквизиты клиентов
+# ---------------------------------------------------------------------------
+
+REQ_CLIENT_PHONE = "1036"
+REQ_CLIENT_TG_ID = "1038"
+REQ_CLIENT_TG_USER = "1040"
+REQ_CLIENT_ADDRESS = "1042"
+REQ_CLIENT_CITY = "1044"
+REQ_CLIENT_COMMENT = "1046"
+REQ_CLIENT_SOURCE = "1069"
+
+# ---------------------------------------------------------------------------
+# Реквизиты позиций заказа
+# ---------------------------------------------------------------------------
+
+REQ_ITEM_QTY = "1061"
+REQ_ITEM_PRICE = "1063"
+REQ_ITEM_SUM = "1065"
+REQ_ITEM_PRODUCT = "1078"
+REQ_ITEM_ORDER = "1154"
+
+# ---------------------------------------------------------------------------
+# Реквизиты товаров
+# ---------------------------------------------------------------------------
+
+REQ_PRODUCT_PRICE = "1027"
+REQ_PRODUCT_WEIGHT = "1029"
+REQ_PRODUCT_DESC = "1031"
+REQ_PRODUCT_INSTOCK = "1033"
+REQ_PRODUCT_SKU = "1035"
+REQ_PRODUCT_CATEGORY = "1067"
+REQ_PRODUCT_SHORT = "1173"
+REQ_PRODUCT_STOCK = "4850"
+
+# ---------------------------------------------------------------------------
+# Реквизиты пользователей веб-панели
+# ---------------------------------------------------------------------------
+
+REQ_USER_PASSWORD_HASH = "4966"
+REQ_USER_ROLE_OLD = "4967"
+REQ_USER_ROLE = "4983"
+REQ_USER_DISPLAY_NAME = "4969"
+REQ_USER_ACTIVE = "4971"
+
+# ---------------------------------------------------------------------------
+# Lookup-справочники (ID записей)
+# ---------------------------------------------------------------------------
 
 # Статусы заказов
 STATUS_IDS = {

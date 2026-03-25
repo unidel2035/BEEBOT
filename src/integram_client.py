@@ -35,6 +35,14 @@ from src.integram_api import (
     REQ_ORDER_SOURCE,
     REQ_ORDER_MESSENGER,
     REQ_ORDER_DATE,
+    REQ_ORDER_SHIPPED_DATE,
+    REQ_ORDER_DELIVERED_DATE,
+    TABLE_STATUS_HISTORY,
+    REQ_HISTORY_ORDER,
+    REQ_HISTORY_STATUS_FROM,
+    REQ_HISTORY_STATUS_TO,
+    REQ_HISTORY_DATE,
+    REQ_HISTORY_COMMENT,
     REQ_CLIENT_PHONE,
     REQ_CLIENT_TG_ID,
     REQ_CLIENT_TG_USER,
@@ -361,15 +369,59 @@ class IntegramClient:
             items=[],
         )
 
-    async def update_order_status(self, order_id: int, status: str) -> None:
-        """Обновить статус заказа в Integram CRM."""
+    async def update_order_status(
+        self, order_id: int, status: str, *, from_status: str | None = None, comment: str = ""
+    ) -> None:
+        """Обновить статус заказа в Integram CRM и записать в Историю статусов."""
         if status not in STATUS_IDS:
             logger.warning("Неизвестный статус '%s'. Допустимые: %s", status, list(STATUS_IDS.keys()))
             return
-        await self._api.set_requisites(order_id, TABLE_ORDERS, {
-            REQ_ORDER_STATUS: STATUS_IDS[status],
-        })
-        logger.info("Статус заказа %d обновлён → '%s'", order_id, status)
+
+        # Получить текущий статус (если не передан) для записи в историю
+        if from_status is None:
+            try:
+                current_order = await self.get_order(order_id)
+                from_status = current_order.status
+            except Exception:
+                from_status = ""
+
+        # Обновить статус
+        reqs: dict[str, str] = {REQ_ORDER_STATUS: STATUS_IDS[status]}
+
+        # Дата отправки — проставляем автоматически при переходе в «Отправлен»
+        if status == "Отправлен":
+            reqs[REQ_ORDER_SHIPPED_DATE] = datetime.now().strftime("%d.%m.%Y 00:00:00")
+
+        # Дата доставки — проставляем автоматически при переходе в «Доставлен»
+        if status == "Доставлен":
+            reqs[REQ_ORDER_DELIVERED_DATE] = datetime.now().strftime("%d.%m.%Y 00:00:00")
+
+        await self._api.set_requisites(order_id, TABLE_ORDERS, reqs)
+        logger.info("Статус заказа %d: '%s' → '%s'", order_id, from_status, status)
+
+        # Записать в Историю статусов (best-effort: не прерывать при ошибке)
+        try:
+            await self._log_status_history(order_id, from_status, status, comment)
+        except Exception as exc:
+            logger.warning("Не удалось записать историю статуса заказа %d: %s", order_id, exc)
+
+    async def _log_status_history(
+        self, order_id: int, from_status: str, to_status: str, comment: str = ""
+    ) -> None:
+        """Создать запись в таблице «История статусов» в Integram."""
+        name = f"{from_status or '—'} → {to_status}"
+        reqs: dict[str, str] = {
+            REQ_HISTORY_ORDER: str(order_id),
+            REQ_HISTORY_DATE: datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+        }
+        if from_status and from_status in STATUS_IDS:
+            reqs[REQ_HISTORY_STATUS_FROM] = STATUS_IDS[from_status]
+        if to_status and to_status in STATUS_IDS:
+            reqs[REQ_HISTORY_STATUS_TO] = STATUS_IDS[to_status]
+        if comment:
+            reqs[REQ_HISTORY_COMMENT] = comment
+
+        await self._api.create_object(TABLE_STATUS_HISTORY, name, reqs)
 
     # Статусы, в которых разрешено редактирование заказа
     EDITABLE_STATUSES = {"Новый", "Подтверждён", "В сборке"}

@@ -60,6 +60,16 @@ REQ_ORDER_STATUS = "1073"
 REQ_ORDER_DELIVERY_METHOD = "1075"
 REQ_ORDER_SOURCE = "1076"
 REQ_ORDER_MESSENGER = "1388"
+REQ_ORDER_SHIPPED_DATE = "6360"    # Дата отправки (добавлено в Заказы)
+REQ_ORDER_DELIVERED_DATE = "6362"  # Дата доставки (добавлено в Заказы)
+
+# История статусов (таблица 6156) — онтологическая таблица изменений статуса
+TABLE_STATUS_HISTORY = 6156
+REQ_HISTORY_ORDER = "6157"        # REF → Заказы
+REQ_HISTORY_STATUS_FROM = "6158"  # REF → Статусы (предыдущий)
+REQ_HISTORY_STATUS_TO = "6160"    # REF → Статусы (новый)
+REQ_HISTORY_DATE = "6162"         # Дата смены
+REQ_HISTORY_COMMENT = "6164"      # Комментарий
 
 # Реквизиты клиентов
 REQ_CLIENT_PHONE = "1036"

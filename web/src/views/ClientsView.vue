@@ -6,18 +6,18 @@
       <DataTable
         :value="clients"
         :loading="loading"
+        lazy
         paginator
-        :rows="25"
+        :rows="50"
+        :total-records="totalRecords"
         row-hover
-        filter-display="row"
-        :global-filter-fields="['name', 'phone', 'city']"
-        v-model:filters="filters"
         class="text-sm"
+        @page="onPage"
         @row-click="(e) => $router.push(`/clients/${e.data.id}`)"
       >
         <template #header>
           <div class="flex justify-between items-center p-1">
-            <span class="text-base font-semibold text-gray-700">{{ clients.length }} клиентов</span>
+            <span class="text-base font-semibold text-gray-700">{{ totalRecords }} клиентов</span>
             <div class="flex gap-2 items-center">
               <IconField>
                 <InputIcon class="pi pi-search" />
@@ -67,7 +67,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import InputText from 'primevue/inputtext'
@@ -78,28 +78,37 @@ import { getClients, exportClients } from '../api.js'
 
 const loading = ref(true)
 const exporting = ref(false)
-const allClients = ref([])
+const clients = ref([])
+const totalRecords = ref(0)
+const currentPage = ref(1)
 const searchQuery = ref('')
-const filters = ref({})
 
-const clients = computed(() => {
-  const q = searchQuery.value.toLowerCase()
-  if (!q) return allClients.value
-  return allClients.value.filter(
-    (c) =>
-      c.name?.toLowerCase().includes(q) ||
-      c.phone?.includes(q) ||
-      c.city?.toLowerCase().includes(q)
-  )
-})
+let searchTimer = null
 
-onMounted(async () => {
+async function loadClients(page = 1) {
+  loading.value = true
+  currentPage.value = page
   try {
-    allClients.value = await getClients()
+    const params = { page }
+    if (searchQuery.value) params.search = searchQuery.value
+    const result = await getClients(params)
+    clients.value = result.items ?? result
+    totalRecords.value = result.total ?? clients.value.length
   } finally {
     loading.value = false
   }
+}
+
+function onPage(event) {
+  loadClients(event.page + 1)
+}
+
+watch(searchQuery, () => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => loadClients(1), 400)
 })
+
+onMounted(() => loadClients())
 
 async function doExport() {
   exporting.value = true

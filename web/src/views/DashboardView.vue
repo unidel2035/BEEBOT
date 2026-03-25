@@ -213,12 +213,12 @@ const DELIVERY_COLORS = ['#f59e0b', '#3b82f6', '#10b981', '#8b5cf6', '#ef4444']
 
 onMounted(async () => {
   try {
-    const [dashData, ordersData] = await Promise.all([
+    const [dashData, ordersResult] = await Promise.all([
       getDashboard(),
-      getOrders()
+      getOrders({ per_page: 10 })
     ])
     stats.value = dashData
-    recentOrders.value = ordersData.slice(0, 10)
+    recentOrders.value = ordersResult.items ?? ordersResult
   } finally {
     loading.value = false
     ordersLoading.value = false

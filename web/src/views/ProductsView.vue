@@ -190,7 +190,8 @@ async function doExport() {
 async function loadProducts() {
   loading.value = true
   try {
-    products.value = await getProducts(!showAll.value)
+    const result = await getProducts(!showAll.value)
+    products.value = result.items ?? result
   } finally {
     loading.value = false
   }

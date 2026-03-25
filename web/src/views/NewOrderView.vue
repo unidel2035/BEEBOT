@@ -157,7 +157,8 @@ const form = ref({
 })
 
 onMounted(async () => {
-  const [prods, refData] = await Promise.all([getProducts(), getReference()])
+  const [prodsResult, refData] = await Promise.all([getProducts(), getReference()])
+  const prods = prodsResult.items ?? prodsResult
   products.value = prods.map((p) => ({ id: p.id, name: p.name, price: p.price }))
   deliveryOptions.value = refData.delivery_methods
 })

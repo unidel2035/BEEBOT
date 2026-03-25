@@ -196,16 +196,18 @@ async function loadOrders() {
   loading.value = true
   try {
     // Загружаем заказы со статусами "Подтверждён" и "В сборке"
-    const { data: confirmed, offline: off1 } = await fetchWithCache(
+    const { data: confirmedRaw, offline: off1 } = await fetchWithCache(
       'packing-confirmed',
-      () => getOrders({ status: 'Подтверждён' })
+      () => getOrders({ status: 'Подтверждён', per_page: 200 })
     )
-    const { data: assembling, offline: off2 } = await fetchWithCache(
+    const { data: assemblingRaw, offline: off2 } = await fetchWithCache(
       'packing-assembling',
-      () => getOrders({ status: 'В сборке' })
+      () => getOrders({ status: 'В сборке', per_page: 200 })
     )
     offline.value = off1 || off2
 
+    const confirmed = confirmedRaw?.items ?? confirmedRaw
+    const assembling = assemblingRaw?.items ?? assemblingRaw
     const allOrders = [...(assembling || []), ...(confirmed || [])]
 
     // Загрузить позиции для каждого заказа

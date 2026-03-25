@@ -76,8 +76,8 @@ export async function getReference() {
 // ---------------------------------------------------------------------------
 
 export async function getOrders(params = {}) {
-  const { data } = await http.get('/orders', { params: { per_page: 1000, ...params } })
-return data.items ?? data
+  const { data } = await http.get('/orders', { params: { per_page: 50, ...params } })
+  return data  // { items, total, page, per_page, total_pages }
 }
 
 export async function getOrder(id) {
@@ -145,9 +145,9 @@ export async function deleteOrderItem(orderId, itemId) {
 // Clients
 // ---------------------------------------------------------------------------
 
-export async function getClients() {
-  const { data } = await http.get('/clients', { params: { per_page: 1000 } })
-  return data.items ?? data
+export async function getClients(params = {}) {
+  const { data } = await http.get('/clients', { params: { per_page: 50, ...params } })
+  return data  // { items, total, page, per_page, total_pages }
 }
 
 export async function getClient(id) {
@@ -159,11 +159,11 @@ export async function getClient(id) {
 // Products
 // ---------------------------------------------------------------------------
 
-export async function getProducts(inStockOnly = false) {
+export async function getProducts(inStockOnly = false, params = {}) {
   const { data } = await http.get('/products', {
-    params: { per_page: 1000, ...(inStockOnly ? { in_stock_only: true } : {}) }
+    params: { per_page: 100, ...(inStockOnly ? { in_stock_only: true } : {}), ...params }
   })
-return data.items ?? data
+  return data  // { items, total, page, per_page, total_pages }
 }
 
 export async function createProduct(body) {

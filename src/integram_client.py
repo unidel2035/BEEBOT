@@ -464,6 +464,26 @@ class IntegramClient:
             await self._api.set_requisites(order_id, TABLE_ORDERS, reqs)
             logger.info("Заказ %d обновлён: %s", order_id, list(kwargs.keys()))
 
+    async def update_order_checklist(
+        self, order_id: int,
+        cdek_confirmed: bool | None = None,
+        client_notified: bool | None = None,
+        stock_checked: bool | None = None,
+    ) -> None:
+        """Обновить чеклист-поля заказа (bool)."""
+        from src.crm_constants import (
+            REQ_ORDER_CDEK_CONFIRMED, REQ_ORDER_CLIENT_NOTIFIED, REQ_ORDER_STOCK_CHECKED,
+        )
+        reqs: dict[str, str] = {}
+        if cdek_confirmed is not None:
+            reqs[REQ_ORDER_CDEK_CONFIRMED] = "1" if cdek_confirmed else "0"
+        if client_notified is not None:
+            reqs[REQ_ORDER_CLIENT_NOTIFIED] = "1" if client_notified else "0"
+        if stock_checked is not None:
+            reqs[REQ_ORDER_STOCK_CHECKED] = "1" if stock_checked else "0"
+        if reqs:
+            await self._api.set_requisites(order_id, TABLE_ORDERS, reqs)
+
     async def get_order_items(self, order_id: int) -> list[OrderItem]:
         """Получить позиции заказа."""
         raw = await self._api.get_order_items(order_id)
@@ -638,6 +658,46 @@ class IntegramClient:
     async def get_dashboard_stats(self) -> dict[str, Any]:
         """Статистика для дашборда."""
         return await self._api.get_dashboard_stats()
+
+    async def get_order_history(self, order_id: int) -> list[dict]:
+        """Получить историю статусов заказа из таблицы «История статусов»."""
+        from src.crm_constants import (
+            TABLE_STATUS_HISTORY, REQ_HISTORY_ORDER,
+            REQ_HISTORY_STATUS_FROM, REQ_HISTORY_STATUS_TO,
+            REQ_HISTORY_DATE, REQ_HISTORY_COMMENT,
+        )
+        from src.integram_api import _strip_html, _extract_ref_text
+
+        # Обратный маппинг ID → название статуса
+        status_by_id = {v: k for k, v in STATUS_IDS.items()}
+
+        records = await self._api.get_all_objects(TABLE_STATUS_HISTORY)
+        result = []
+        for rec in records:
+            reqs = rec.get("reqs", {})
+            ref_order_raw = reqs.get(REQ_HISTORY_ORDER, "")
+            # Integram хранит REF как HTML-ссылку; ID заказа — в тексте или как число
+            ref_order_id_str = _extract_ref_text(ref_order_raw) or _strip_html(ref_order_raw)
+            try:
+                ref_order_id = int(ref_order_id_str)
+            except (ValueError, TypeError):
+                ref_order_id = 0
+
+            if ref_order_id != order_id:
+                continue
+
+            from_id = _strip_html(reqs.get(REQ_HISTORY_STATUS_FROM, ""))
+            to_id = _strip_html(reqs.get(REQ_HISTORY_STATUS_TO, ""))
+            result.append({
+                "id": rec.get("id"),
+                "date": _strip_html(reqs.get(REQ_HISTORY_DATE, "")),
+                "from_status": status_by_id.get(from_id, from_id or "—"),
+                "to_status": status_by_id.get(to_id, to_id or "—"),
+                "comment": _strip_html(reqs.get(REQ_HISTORY_COMMENT, "")),
+            })
+
+        result.sort(key=lambda x: x.get("date", ""))
+        return result
 
     async def get_client_telegram_id(self, client_id: int) -> Optional[int]:
         """Получить Telegram ID клиента по ID в CRM."""

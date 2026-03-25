@@ -107,6 +107,16 @@ export async function updateOrder(id, body) {
   return data
 }
 
+export async function getOrderHistory(orderId) {
+  const { data } = await http.get(`/orders/${orderId}/history`)
+  return data
+}
+
+export async function updateOrderChecklist(orderId, body) {
+  const { data } = await http.patch(`/orders/${orderId}/checklist`, body)
+  return data
+}
+
 // ---------------------------------------------------------------------------
 // Order Items
 // ---------------------------------------------------------------------------

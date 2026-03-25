@@ -10,6 +10,7 @@ from src.integram_api import IntegramAPIError
 from src.integram_client import IntegramError, IntegramNotFoundError
 from src.web.deps import (
     CurrentUser,
+    ChecklistUpdate,
     EDITABLE_STATUSES,
     ItemCreate,
     ItemUpdate,
@@ -113,6 +114,22 @@ async def get_order(
         raise HTTPException(status_code=502, detail="Ошибка CRM")
 
 
+@router.get("/api/orders/{order_id}/history")
+async def get_order_history(
+    order_id: int,
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
+) -> list[dict]:
+    try:
+        crm = await _get_crm()
+        try:
+            return await crm.get_order_history(order_id)
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
+
+
 @router.patch("/api/orders/{order_id}/status")
 async def update_order_status(
     order_id: int,
@@ -166,6 +183,29 @@ async def update_order_status(
                 "status": body.status,
             })
             return {"ok": True, "order_id": order_id, "status": body.status, "notified": notified}
+        finally:
+            await crm.close()
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
+
+
+@router.patch("/api/orders/{order_id}/checklist")
+async def update_order_checklist(
+    order_id: int,
+    body: ChecklistUpdate,
+    _: CurrentUser = Depends(_require_role("admin", "warehouse")),
+) -> dict:
+    try:
+        crm = await _get_crm()
+        try:
+            await crm.update_order_checklist(
+                order_id,
+                cdek_confirmed=body.cdek_confirmed,
+                client_notified=body.client_notified,
+                stock_checked=body.stock_checked,
+            )
+            return {"ok": True, "order_id": order_id}
         finally:
             await crm.close()
     except (IntegramError, IntegramAPIError) as exc:

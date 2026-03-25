@@ -125,6 +125,7 @@ async def update_order_status(
         crm = await _get_crm()
         try:
             order = None
+            prev_status: str | None = None
             if user.role == "warehouse":
                 try:
                     order = await crm.get_order(order_id)
@@ -132,8 +133,9 @@ async def update_order_status(
                     raise HTTPException(404, "Заказ не найден")
                 if (order.status, body.status) not in _WAREHOUSE_STATUS_TRANSITIONS:
                     raise HTTPException(403, f"Склад не может менять статус с «{order.status}» на «{body.status}»")
+                prev_status = order.status
 
-            await crm.update_order_status(order_id, body.status)
+            await crm.update_order_status(order_id, body.status, from_status=prev_status)
 
             notified = False
             try:

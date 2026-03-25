@@ -202,8 +202,9 @@ function onOffline() {
 async function loadProducts() {
   loading.value = true
   try {
-    const { data, offline: off } = await fetchWithCache('stock-products', () => getProducts())
+    const { data: rawData, offline: off } = await fetchWithCache('stock-products', () => getProducts())
     offline.value = off
+    const data = rawData?.items ?? rawData
     products.value = (data || []).map(p => ({
       ...p,
       stock: p.stock ?? null,

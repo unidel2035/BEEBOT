@@ -50,10 +50,13 @@
       <DataTable
         :value="orders"
         :loading="loading"
+        lazy
         paginator
-        :rows="20"
+        :rows="50"
+        :total-records="totalRecords"
         row-hover
         class="text-sm"
+        @page="onPage"
         @row-click="(e) => $router.push(`/orders/${e.data.id}`)"
       >
         <template #empty>
@@ -114,6 +117,8 @@ import { formatDate, formatMoney } from '../utils.js'
 const loading = ref(true)
 const exporting = ref(false)
 const orders = ref([])
+const totalRecords = ref(0)
+const currentPage = ref(1)
 const filterStatus = ref('')
 const filterSource = ref('')
 const statusOptions = ref([])
@@ -126,22 +131,29 @@ onMounted(async () => {
   await loadOrders()
 })
 
-async function loadOrders() {
+async function loadOrders(page = 1) {
   loading.value = true
+  currentPage.value = page
   try {
-    const params = {}
+    const params = { page }
     if (filterStatus.value) params.status = filterStatus.value
     if (filterSource.value) params.source = filterSource.value
-    orders.value = await getOrders(params)
+    const result = await getOrders(params)
+    orders.value = result.items ?? result
+    totalRecords.value = result.total ?? orders.value.length
   } finally {
     loading.value = false
   }
 }
 
+function onPage(event) {
+  loadOrders(event.page + 1)
+}
+
 function resetFilters() {
   filterStatus.value = ''
   filterSource.value = ''
-  loadOrders()
+  loadOrders(1)
 }
 
 async function doExport() {

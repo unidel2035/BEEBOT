@@ -219,6 +219,30 @@ export async function exportProducts() {
 }
 
 // ---------------------------------------------------------------------------
+// Batches (Партии отправки)
+// ---------------------------------------------------------------------------
+
+export async function getBatches(params = {}) {
+  const { data } = await http.get('/batches', { params })
+  return data  // { items, total, ... }
+}
+
+export async function createBatch(body) {
+  const { data } = await http.post('/batches', body)
+  return data
+}
+
+export async function assignOrderBatch(orderId, batchId) {
+  const { data } = await http.patch(`/orders/${orderId}/batch`, { batch_id: batchId })
+  return data
+}
+
+export async function getBatchOrders(batchId) {
+  const { data } = await http.get(`/batches/${batchId}/orders`)
+  return data
+}
+
+// ---------------------------------------------------------------------------
 // Users (Пользователи)
 // ---------------------------------------------------------------------------
 

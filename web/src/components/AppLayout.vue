@@ -115,6 +115,7 @@ const allNavItems = [
   { to: '/clients', icon: 'pi-users', label: 'Клиенты', roles: ['admin'] },
   { to: '/products', icon: 'pi-box', label: 'Товары', roles: ['admin'] },
   { to: '/orders/new', icon: 'pi-plus-circle', label: 'Новый заказ', roles: ['admin'] },
+  { to: '/batches', icon: 'pi-send', label: 'Партии отправки', roles: ['admin'] },
   { to: '/packing', icon: 'pi-box', label: 'Сборка', roles: ['admin', 'warehouse'] },
   { to: '/stock', icon: 'pi-warehouse', label: 'Склад', roles: ['admin', 'warehouse'] },
   { to: '/users', icon: 'pi-cog', label: 'Пользователи', roles: ['admin'] },
@@ -130,7 +131,7 @@ const roleName = computed(() => {
 })
 
 function isActive(path) {
-  if (path === '/dashboard' || path === '/journal') return route.path === path
+  if (path === '/dashboard' || path === '/journal' || path === '/batches') return route.path === path
   return route.path.startsWith(path)
 }
 

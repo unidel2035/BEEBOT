@@ -35,6 +35,7 @@ from src.web.deps import (
     push_event,
 )
 from src.web.routers.auth import router as auth_router
+from src.web.routers.batches import router as batches_router
 from src.web.routers.clients import router as clients_router
 from src.web.routers.dashboard import router as dashboard_router
 from src.web.routers.export import router as export_router
@@ -107,6 +108,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(batches_router)
 app.include_router(dashboard_router)
 app.include_router(orders_router)
 app.include_router(order_items_router)

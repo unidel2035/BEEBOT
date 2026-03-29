@@ -20,7 +20,7 @@ from aiogram.types import (
 
 import httpx
 
-from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID, ADMIN_IDS, ACTIVE_GROUP_IDS, TG_SOCKS_PROXY, DEVBOT_API_URL
+from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID, ADMIN_IDS, ACTIVE_GROUP_IDS, TG_SOCKS_PROXY, DEVBOT_API_URL, WORKER_CHAT_IDS
 from src.phone_utils import validate_phone, format_phone
 from src.delivery.tracker import OrderTracker
 from src.integrations.uds import UDSClient, UDSPoller
@@ -47,6 +47,7 @@ from src.agents.admin_chat import AdminChatAgent
 from src.orchestrator import Orchestrator
 from src.agents.analyst import AnalystAgent
 from src.admin import router as admin_router, setup_admin
+from src.agents import worker as worker_agent
 from src.llm_client import VOICE_STYLES, DEFAULT_VOICE
 from src.logging_config import setup_logging
 
@@ -57,6 +58,9 @@ _user_styles: dict[int, str] = {}
 
 # Пользователи в режиме «Ассистент пчеловода»
 _admin_mode_users: set[int] = set()
+
+# CRM-клиент для режима работника (устанавливается в main)
+_worker_crm: Optional[IntegramClient] = None
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)  # может быть переопределён в main() с прокси
 dp = Dispatcher(storage=MemoryStorage())
@@ -199,7 +203,149 @@ def _get_instruction_keyboard(chunks: list[dict]) -> InlineKeyboardMarkup:
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
+    # Работники склада видят очередь сборки вместо обычного приветствия
+    if WORKER_CHAT_IDS and message.from_user.id in WORKER_CHAT_IDS:
+        await _worker_show_queue(message.chat.id, message)
+        return
     await message.answer(WELCOME_MESSAGE, reply_markup=_build_start_keyboard())
+
+
+@dp.message(Command("queue"))
+async def cmd_worker_queue(message: types.Message):
+    """Показать очередь сборки (только для работников склада)."""
+    if not WORKER_CHAT_IDS or message.from_user.id not in WORKER_CHAT_IDS:
+        return
+    await _worker_show_queue(message.chat.id, message)
+
+
+async def _worker_show_queue(chat_id: int, source: types.Message | types.CallbackQuery) -> None:
+    """Отправить/обновить сообщение с очередью заказов."""
+    if not _worker_crm:
+        text = "⚠️ CRM недоступна — попробуйте позже."
+        if isinstance(source, types.Message):
+            await source.answer(text)
+        else:
+            await source.message.edit_text(text)
+        return
+    try:
+        orders = await worker_agent.get_worker_queue(_worker_crm)
+        text = worker_agent.format_queue_text(orders)
+        keyboard = worker_agent.build_queue_keyboard(orders)
+        if isinstance(source, types.Message):
+            await source.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await source.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception as e:
+        logger.error("Ошибка загрузки очереди работника: %s", e)
+        err = "❌ Не удалось загрузить очередь. Попробуйте ещё раз."
+        if isinstance(source, types.Message):
+            await source.answer(err)
+        else:
+            await source.message.edit_text(err)
+
+
+@dp.callback_query(F.data == "worker:queue")
+async def cb_worker_queue(callback: types.CallbackQuery):
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await _worker_show_queue(callback.message.chat.id, callback)
+
+
+@dp.callback_query(F.data.startswith("worker:order:"))
+async def cb_worker_order(callback: types.CallbackQuery):
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    order_id = int(callback.data.split(":")[2])
+    await _worker_show_order(callback, order_id)
+
+
+@dp.callback_query(F.data.startswith("worker:take:"))
+async def cb_worker_take(callback: types.CallbackQuery):
+    """Работник берёт заказ в работу → статус «В сборке»."""
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    order_id = int(callback.data.split(":")[2])
+    if not _worker_crm:
+        await callback.answer("⚠️ CRM недоступна.", show_alert=True)
+        return
+    try:
+        order = await _worker_crm.get_order(order_id)
+        if order.status not in ("Новый", "Подтверждён"):
+            await callback.answer(f"Заказ уже в статусе «{order.status}».", show_alert=True)
+            return
+        await _worker_crm.update_order_status(order_id, "В сборке", comment="Взят в работу работником склада")
+        await callback.answer("✅ Взят в работу!")
+    except Exception as e:
+        logger.error("Ошибка взятия заказа в работу: %s", e)
+        await callback.answer("❌ Ошибка. Попробуйте ещё раз.", show_alert=True)
+        return
+    await _worker_show_order(callback, order_id)
+
+
+@dp.callback_query(F.data.startswith("worker:check:"))
+async def cb_worker_check(callback: types.CallbackQuery):
+    """Отметить/снять позицию в чеклисте."""
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    order_id = int(parts[2])
+    item_id = int(parts[3])
+    worker_agent.toggle_item(callback.from_user.id, order_id, item_id)
+    await callback.answer()
+    await _worker_show_order(callback, order_id)
+
+
+@dp.callback_query(F.data.startswith("worker:done:"))
+async def cb_worker_done(callback: types.CallbackQuery):
+    """Работник завершил сборку → уведомить пчеловода."""
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    order_id = int(callback.data.split(":")[2])
+    if not _worker_crm:
+        await callback.answer("⚠️ CRM недоступна.", show_alert=True)
+        return
+    try:
+        order = await _worker_crm.get_order(order_id)
+        # Отметить «Наличие проверено» в чеклисте CRM
+        await _worker_crm.update_order_checklist(order_id, stock_checked=True)
+        worker_agent.clear_checklist(callback.from_user.id, order_id)
+
+        # Уведомить пчеловода
+        from src.notifications import _worker_notifier
+        if _worker_notifier:
+            await _worker_notifier.notify_workers_assembled(order_id, order.number or str(order_id))
+
+        await callback.answer("📦 Пчеловод уведомлён!", show_alert=True)
+    except Exception as e:
+        logger.error("Ошибка завершения сборки: %s", e)
+        await callback.answer("❌ Ошибка. Попробуйте ещё раз.", show_alert=True)
+        return
+
+    # Вернуться к очереди
+    await _worker_show_queue(callback.message.chat.id, callback)
+
+
+async def _worker_show_order(callback: types.CallbackQuery, order_id: int) -> None:
+    """Показать карточку заказа с чеклистом."""
+    if not _worker_crm:
+        await callback.message.edit_text("⚠️ CRM недоступна.")
+        return
+    try:
+        order = await _worker_crm.get_order(order_id)
+        items = await _worker_crm.get_order_items(order_id)
+        text = worker_agent.format_order_card(order, items, callback.from_user.id)
+        keyboard = worker_agent.build_order_keyboard(order_id, items, callback.from_user.id, order.status)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception as e:
+        logger.error("Ошибка загрузки карточки заказа %d: %s", order_id, e)
+        await callback.message.edit_text("❌ Не удалось загрузить заказ. Попробуйте ещё раз.")
 
 
 @dp.message(Command("help"))
@@ -1474,6 +1620,15 @@ async def main():
 
     # Инициализировать админ-модуль (один раз, с CRM если доступна)
     setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory)
+
+    # --- Режим работника склада ---
+    if WORKER_CHAT_IDS and integram_client:
+        global _worker_crm
+        _worker_crm = integram_client
+        from src.notifications import Notifier
+        import src.notifications as _notif_module
+        _notif_module._worker_notifier = Notifier(bot)
+        logger.info("Режим работника склада включён (%d работников).", len(WORKER_CHAT_IDS))
 
     # --- Авто-трекинг: фоновая проверка статуса отправлений ---
     order_tracker: Optional[OrderTracker] = None

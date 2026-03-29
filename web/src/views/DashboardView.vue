@@ -97,44 +97,87 @@
       <DataTable
         :value="recentOrders"
         :loading="ordersLoading"
+        v-model:expandedRows="expandedRows"
         row-hover
         class="text-sm"
         @row-click="(e) => $router.push(`/orders/${e.data.id}`)"
       >
-        <Column field="number" header="Номер" style="width:120px" />
+        <Column expander style="width:3rem" />
+        <Column field="number" header="Номер" style="width:110px" />
         <Column field="client_name" header="Клиент">
           <template #body="{ data }">{{ data.client_name || `Клиент #${data.client_id}` }}</template>
         </Column>
-        <Column field="date" header="Дата">
+        <Column field="date" header="Дата" style="width:110px">
           <template #body="{ data }">{{ formatDate(data.date) }}</template>
         </Column>
-        <Column field="status" header="Статус">
+        <Column field="status" header="Статус" style="width:130px">
           <template #body="{ data }">
             <StatusBadge :status="data.status" />
           </template>
         </Column>
-        <Column field="total" header="Сумма">
+        <Column field="total" header="Сумма" style="width:110px">
           <template #body="{ data }">{{ formatMoney(data.total) }}</template>
         </Column>
+        <template #expansion="{ data }">
+          <div class="px-4 py-2">
+            <div v-if="!data.items" class="text-sm text-gray-400">Загрузка состава...</div>
+            <div v-else-if="data.items.length === 0" class="text-sm text-gray-400">Позиции не найдены в CRM</div>
+            <table v-else class="text-sm w-full">
+              <thead>
+                <tr class="text-gray-500 text-xs">
+                  <th class="text-left pb-1 font-medium">Товар</th>
+                  <th class="text-right pb-1 font-medium w-16">Кол-во</th>
+                  <th class="text-right pb-1 font-medium w-24">Цена</th>
+                  <th class="text-right pb-1 font-medium w-24">Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in data.items" :key="item.id" class="border-t border-gray-100">
+                  <td class="py-1 text-gray-700">{{ item.product_name || `Товар #${item.product_id}` }}</td>
+                  <td class="py-1 text-right text-gray-600">{{ item.quantity }} шт</td>
+                  <td class="py-1 text-right text-gray-600">{{ formatMoney(item.unit_price) }}</td>
+                  <td class="py-1 text-right font-medium">{{ formatMoney(item.total) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
       </DataTable>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Skeleton from 'primevue/skeleton'
 import Chart from 'primevue/chart'
-import { getDashboard, getDashboardCharts, getOrders } from '../api.js'
+import { getDashboard, getDashboardCharts, getOrders, getOrderItems } from '../api.js'
 import StatCard from '../components/StatCard.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { formatDate, formatMoney } from '../utils.js'
 
 const loading = ref(true)
 const ordersLoading = ref(true)
+const expandedRows = ref({})
+
+// При раскрытии строки — загрузить позиции заказа если ещё не загружены
+watch(expandedRows, async (val) => {
+  for (const orderId of Object.keys(val)) {
+    const order = recentOrders.value.find(o => String(o.id) === orderId)
+    if (order && order.items === undefined) {
+      order.items = null  // индикатор загрузки
+      try {
+        const items = await getOrderItems(Number(orderId))
+        order.items = Array.isArray(items) ? items : (items.items ?? [])
+      } catch {
+        order.items = []
+      }
+    }
+  }
+})
 const stats = ref({
   total_orders: 0,
   total_clients: 0,

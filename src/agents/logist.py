@@ -373,6 +373,24 @@ class LogistAgent:
             )
 
             logger.info("Создан заказ #%s для клиента %s", order.number, full_name)
+
+            # Уведомить работников склада
+            try:
+                from src.notifications import _worker_notifier
+                if _worker_notifier:
+                    items_summary = "\n".join(
+                        f"  • {i['name']} × {i['qty']} шт" for i in cart
+                    )
+                    await _worker_notifier.notify_workers_new_order(
+                        order_id=order.id,
+                        order_number=order.number,
+                        client_name=full_name,
+                        items_summary=items_summary,
+                        total=total,
+                    )
+            except Exception as _e:
+                logger.warning("Не удалось уведомить работников склада: %s", _e)
+
             return True, (
                 f"✅ Заказ *#{order.number}* оформлен!\n\n"
                 f"Александр свяжется с вами для подтверждения.\n"

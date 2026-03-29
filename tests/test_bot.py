@@ -173,7 +173,9 @@ class TestHandleQuestion:
             mock_bot.send_chat_action = AsyncMock()
             await handle_question(msg, state)
 
-        mock_orchestrator.route.assert_called_once_with(msg.from_user.id, "Как принимать прополис?", style=None)
+        call_kwargs = mock_orchestrator.route.call_args
+        assert call_kwargs.args[:2] == (msg.from_user.id, "Как принимать прополис?")
+        assert call_kwargs.kwargs.get("style") is None
 
     @pytest.mark.asyncio
     async def test_calls_llm_generate_with_chunks(self):

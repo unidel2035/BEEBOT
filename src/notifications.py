@@ -23,9 +23,12 @@ from typing import Optional
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from src.config import BEEKEEPER_CHAT_ID, ACTIVE_GROUP_IDS
+from src.config import BEEKEEPER_CHAT_ID, ACTIVE_GROUP_IDS, WORKER_CHAT_IDS
 
 logger = logging.getLogger(__name__)
+
+# Глобальный экземпляр для вызова из агентов (logist, uds, web)
+_worker_notifier: Optional["Notifier"] = None
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +206,48 @@ class Notifier:
                 await self._bot.send_message(group_id, text, parse_mode="Markdown")
             except Exception as e:
                 logger.warning("Не удалось отправить уведомление в группу %d: %s", group_id, e)
+
+    async def notify_workers_assembled(self, order_id: int, order_number: str) -> None:
+        """Уведомить пчеловода что заказ собран и ждёт отправки."""
+        text = (
+            f"✅ *Заказ #{order_number} собран*\n\n"
+            f"Готов к отправке. Можно менять статус на «Отправлен»."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="📦 Открыть заказ",
+                callback_data=f"order_open:{order_id}",
+            ),
+        ]])
+        await self._send_to_beekeeper(text, reply_markup=keyboard)
+
+    async def notify_workers_new_order(
+        self,
+        order_id: int,
+        order_number: str,
+        client_name: str,
+        items_summary: str,
+        total: float,
+    ) -> None:
+        """Уведомить всех работников склада о новом заказе."""
+        if not WORKER_CHAT_IDS:
+            return
+        text = (
+            f"📦 *Новый заказ #{order_number}*\n\n"
+            f"👤 {client_name}\n"
+            f"💰 {total:.0f} ₽\n\n"
+            f"{items_summary}"
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📋 Открыть очередь", callback_data="worker:queue"),
+        ]])
+        for worker_id in WORKER_CHAT_IDS:
+            try:
+                await self._bot.send_message(
+                    worker_id, text, parse_mode="Markdown", reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.warning("Не удалось уведомить работника %d: %s", worker_id, e)
 
     async def _send_to_client(self, telegram_id: int, text: str) -> None:
         """Отправить уведомление клиенту (если есть Telegram ID)."""

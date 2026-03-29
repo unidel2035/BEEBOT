@@ -20,7 +20,7 @@ from aiogram.types import (
 
 import httpx
 
-from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID, ADMIN_IDS, ACTIVE_GROUP_IDS, TG_SOCKS_PROXY, DEVBOT_API_URL
+from src.config import TELEGRAM_BOT_TOKEN, BASE_DIR, PDFS_DIR, BEEKEEPER_CHAT_ID, ADMIN_CHAT_ID, ADMIN_IDS, ACTIVE_GROUP_IDS, TG_SOCKS_PROXY, DEVBOT_API_URL, WORKER_CHAT_IDS
 from src.phone_utils import validate_phone, format_phone
 from src.delivery.tracker import OrderTracker
 from src.integrations.uds import UDSClient, UDSPoller
@@ -47,6 +47,7 @@ from src.agents.admin_chat import AdminChatAgent
 from src.orchestrator import Orchestrator
 from src.agents.analyst import AnalystAgent
 from src.admin import router as admin_router, setup_admin
+from src.agents import worker as worker_agent
 from src.llm_client import VOICE_STYLES, DEFAULT_VOICE
 from src.logging_config import setup_logging
 
@@ -57,6 +58,9 @@ _user_styles: dict[int, str] = {}
 
 # Пользователи в режиме «Ассистент пчеловода»
 _admin_mode_users: set[int] = set()
+
+# CRM-клиент для режима работника (устанавливается в main)
+_worker_crm: Optional[IntegramClient] = None
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)  # может быть переопределён в main() с прокси
 dp = Dispatcher(storage=MemoryStorage())
@@ -77,6 +81,9 @@ admin_chat_agent = AdminChatAgent(
 )
 
 # setup_admin() вызывается в main() — один раз, после подключения CRM
+
+# CRM snapshot — кэш заказов с позициями (обновляется в фоне)
+_crm_snapshot: Optional["CrmSnapshot"] = None  # type: ignore[name-defined]
 
 # Хранилище задач таймаута (user_id → asyncio.Task)
 _timeout_lock = asyncio.Lock()
@@ -140,6 +147,63 @@ VOICE_MESSAGE = "Голосовые сообщения пока не подде�
 BOT_USERNAME = "AleksandrDmitrov_BEEBOT"
 
 
+# ---------------------------------------------------------------------------
+# Тексты кнопок главного меню — используются и при построении клавиатуры,
+# и при сопоставлении входящих текстов с обработчиками.
+# ---------------------------------------------------------------------------
+BTN_ASK        = "💬 Спросить"
+BTN_PRODUCTS   = "📦 Продукты"
+BTN_ORDER      = "🛒 Заказать"
+BTN_INSPECT    = "🔍 Осмотр улья"
+BTN_VOICE      = "🎙 Голос Улья"
+BTN_HELP       = "❓ Помощь"
+BTN_STATS      = "📊 Статистика"
+BTN_ADMIN      = "🤖 Ассистент"
+BTN_QUEUE      = "📦 Очередь склада"
+BTN_VIEW_USER  = "👤 Глазами клиента"
+BTN_VIEW_WORK  = "👷 Глазами работника"
+BTN_BACK_ADMIN = "🔙 Режим Админа"
+BTN_REFRESH    = "🔄 Обновить CRM"
+
+ALL_MENU_BTNS = {
+    BTN_ASK, BTN_PRODUCTS, BTN_ORDER, BTN_INSPECT, BTN_VOICE, BTN_HELP,
+    BTN_STATS, BTN_ADMIN, BTN_QUEUE, BTN_VIEW_USER, BTN_VIEW_WORK,
+    BTN_BACK_ADMIN, BTN_REFRESH,
+}
+
+# Текущий вид для каждого администратора: "admin" | "user" | "worker"
+_admin_view_mode: dict[int, str] = {}
+
+
+def _build_main_keyboard(is_admin: bool = False, view: str = "admin") -> ReplyKeyboardMarkup:
+    """Постоянная нижняя клавиатура.
+
+    view="admin"  — полный режим администратора
+    view="user"   — вид глазами клиента (+ кнопка возврата)
+    view="worker" — вид глазами работника (только кнопка возврата)
+    """
+    if view == "user":
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text=BTN_ASK), KeyboardButton(text=BTN_PRODUCTS), KeyboardButton(text=BTN_ORDER)],
+            [KeyboardButton(text=BTN_INSPECT), KeyboardButton(text=BTN_VOICE), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_BACK_ADMIN)],
+        ], resize_keyboard=True)
+
+    if view == "worker":
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text=BTN_BACK_ADMIN)],
+        ], resize_keyboard=True)
+
+    # view == "admin"
+    rows = [
+        [KeyboardButton(text=BTN_ASK), KeyboardButton(text=BTN_PRODUCTS), KeyboardButton(text=BTN_ORDER)],
+        [KeyboardButton(text=BTN_INSPECT), KeyboardButton(text=BTN_VOICE), KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_ADMIN), KeyboardButton(text=BTN_QUEUE)],
+        [KeyboardButton(text=BTN_VIEW_USER), KeyboardButton(text=BTN_VIEW_WORK), KeyboardButton(text=BTN_REFRESH)],
+    ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
 def _build_start_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="📦 Все продукты", callback_data="show_products"),
@@ -199,7 +263,288 @@ def _get_instruction_keyboard(chunks: list[dict]) -> InlineKeyboardMarkup:
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    await message.answer(WELCOME_MESSAGE, reply_markup=_build_start_keyboard())
+    uid = message.from_user.id
+    is_admin = bool(ADMIN_IDS and uid in ADMIN_IDS)
+
+    # Работники склада (не-администраторы) сразу видят очередь сборки
+    if WORKER_CHAT_IDS and uid in WORKER_CHAT_IDS and not is_admin:
+        await _worker_show_queue(message.chat.id, message)
+        return
+
+    # Сбросить вид на "admin" при /start
+    if is_admin:
+        _admin_view_mode[uid] = "admin"
+
+    await message.answer(
+        WELCOME_MESSAGE,
+        reply_markup=_build_main_keyboard(is_admin=is_admin, view="admin"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Обработчики кнопок главного меню (ReplyKeyboard)
+# ---------------------------------------------------------------------------
+
+@dp.message(F.text == BTN_ASK)
+async def btn_ask(message: types.Message):
+    await message.answer(ASK_MESSAGE)
+
+
+@dp.message(F.text == BTN_PRODUCTS)
+async def btn_products(message: types.Message):
+    await message.answer(PRODUCTS_MESSAGE, reply_markup=_build_products_keyboard())
+
+
+@dp.message(F.text == BTN_ORDER)
+async def btn_order(message: types.Message, state: FSMContext):
+    await cmd_order(message, state)
+
+
+@dp.message(F.text == BTN_INSPECT)
+async def btn_inspect(message: types.Message, state: FSMContext):
+    await cmd_inspect(message, state)
+
+
+@dp.message(F.text == BTN_VOICE)
+async def btn_voice(message: types.Message):
+    current = _user_styles.get(message.from_user.id, DEFAULT_VOICE)
+    await message.answer(
+        VOICE_HIVE_MESSAGE,
+        parse_mode="Markdown",
+        reply_markup=_build_voice_keyboard(current),
+    )
+
+
+@dp.message(F.text == BTN_HELP)
+async def btn_help(message: types.Message):
+    await message.answer(HELP_MESSAGE)
+
+
+@dp.message(F.text == BTN_STATS)
+async def btn_stats(message: types.Message):
+    if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+        return
+    await cmd_stats(message)
+
+
+@dp.message(F.text == BTN_ADMIN)
+async def btn_admin_mode(message: types.Message):
+    if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+        return
+    await cmd_admin_mode(message)
+
+
+@dp.message(F.text == BTN_QUEUE)
+async def btn_queue(message: types.Message):
+    if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+        return
+    await _worker_show_queue(message.chat.id, message)
+
+
+@dp.message(F.text == BTN_VIEW_USER)
+async def btn_view_as_user(message: types.Message):
+    """Администратор переключается в вид «Глазами клиента»."""
+    uid = message.from_user.id
+    if not ADMIN_IDS or uid not in ADMIN_IDS:
+        return
+    _admin_view_mode[uid] = "user"
+    await message.answer(
+        "👤 *Вид «Глазами клиента»*\n\nТеперь ты видишь то, что видят покупатели.\nКнопка «🔙 Режим Админа» вернёт тебя обратно.",
+        parse_mode="Markdown",
+        reply_markup=_build_main_keyboard(is_admin=True, view="user"),
+    )
+
+
+@dp.message(F.text == BTN_VIEW_WORK)
+async def btn_view_as_worker(message: types.Message):
+    """Администратор переключается в вид «Глазами работника»."""
+    uid = message.from_user.id
+    if not ADMIN_IDS or uid not in ADMIN_IDS:
+        return
+    _admin_view_mode[uid] = "worker"
+    await message.answer(
+        "👷 *Вид «Глазами работника»*\n\nПоказываю очередь сборки — как её видит работник склада.",
+        parse_mode="Markdown",
+        reply_markup=_build_main_keyboard(is_admin=True, view="worker"),
+    )
+    await _worker_show_queue(message.chat.id, message)
+
+
+@dp.message(F.text == BTN_BACK_ADMIN)
+async def btn_back_to_admin(message: types.Message):
+    """Вернуться в полный режим администратора."""
+    uid = message.from_user.id
+    if not ADMIN_IDS or uid not in ADMIN_IDS:
+        return
+    _admin_view_mode[uid] = "admin"
+    await message.answer(
+        "🔙 *Режим Админа*",
+        parse_mode="Markdown",
+        reply_markup=_build_main_keyboard(is_admin=True, view="admin"),
+    )
+
+
+@dp.message(F.text == BTN_REFRESH)
+@dp.message(Command("refresh_crm"))
+async def btn_refresh_crm(message: types.Message):
+    """Принудительное обновление CRM snapshot (только админ)."""
+    if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+        return
+    if not _crm_snapshot:
+        await message.answer("⚠️ CRM snapshot не инициализирован.")
+        return
+    msg = await message.answer("🔄 Обновляю снимок CRM...")
+    try:
+        await _crm_snapshot.refresh()
+        await msg.edit_text(
+            f"✅ Снимок CRM обновлён\n"
+            f"📦 Заказов: {len(_crm_snapshot.orders)}\n"
+            f"👥 Клиентов: {len(_crm_snapshot.clients)}\n"
+            f"🍯 Товаров: {len(_crm_snapshot.products)}\n"
+            f"⏱ {_crm_snapshot.age_str}"
+        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка обновления: {e}")
+
+
+@dp.message(Command("queue"))
+async def cmd_worker_queue(message: types.Message):
+    """Показать очередь сборки (только для работников склада)."""
+    uid = message.from_user.id
+    is_admin = bool(ADMIN_IDS and uid in ADMIN_IDS)
+    if not is_admin and (not WORKER_CHAT_IDS or uid not in WORKER_CHAT_IDS):
+        return
+    await _worker_show_queue(message.chat.id, message)
+
+
+async def _worker_show_queue(chat_id: int, source: types.Message | types.CallbackQuery) -> None:
+    """Отправить/обновить сообщение с очередью заказов."""
+    if not _worker_crm:
+        text = "⚠️ CRM недоступна — попробуйте позже."
+        if isinstance(source, types.Message):
+            await source.answer(text)
+        else:
+            await source.message.edit_text(text)
+        return
+    try:
+        orders = await worker_agent.get_worker_queue(_worker_crm)
+        text = worker_agent.format_queue_text(orders)
+        keyboard = worker_agent.build_queue_keyboard(orders)
+        if isinstance(source, types.Message):
+            await source.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await source.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception as e:
+        logger.error("Ошибка загрузки очереди работника: %s", e)
+        err = "❌ Не удалось загрузить очередь. Попробуйте ещё раз."
+        if isinstance(source, types.Message):
+            await source.answer(err)
+        else:
+            await source.message.edit_text(err)
+
+
+@dp.callback_query(F.data == "worker:queue")
+async def cb_worker_queue(callback: types.CallbackQuery):
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await _worker_show_queue(callback.message.chat.id, callback)
+
+
+@dp.callback_query(F.data.startswith("worker:order:"))
+async def cb_worker_order(callback: types.CallbackQuery):
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    order_id = int(callback.data.split(":")[2])
+    await _worker_show_order(callback, order_id)
+
+
+@dp.callback_query(F.data.startswith("worker:take:"))
+async def cb_worker_take(callback: types.CallbackQuery):
+    """Работник берёт заказ в работу → статус «В сборке»."""
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    order_id = int(callback.data.split(":")[2])
+    if not _worker_crm:
+        await callback.answer("⚠️ CRM недоступна.", show_alert=True)
+        return
+    try:
+        order = await _worker_crm.get_order(order_id)
+        if order.status not in ("Новый", "Подтверждён"):
+            await callback.answer(f"Заказ уже в статусе «{order.status}».", show_alert=True)
+            return
+        await _worker_crm.update_order_status(order_id, "В сборке", comment="Взят в работу работником склада")
+        await callback.answer("✅ Взят в работу!")
+    except Exception as e:
+        logger.error("Ошибка взятия заказа в работу: %s", e)
+        await callback.answer("❌ Ошибка. Попробуйте ещё раз.", show_alert=True)
+        return
+    await _worker_show_order(callback, order_id)
+
+
+@dp.callback_query(F.data.startswith("worker:check:"))
+async def cb_worker_check(callback: types.CallbackQuery):
+    """Отметить/снять позицию в чеклисте."""
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    order_id = int(parts[2])
+    item_id = int(parts[3])
+    worker_agent.toggle_item(callback.from_user.id, order_id, item_id)
+    await callback.answer()
+    await _worker_show_order(callback, order_id)
+
+
+@dp.callback_query(F.data.startswith("worker:done:"))
+async def cb_worker_done(callback: types.CallbackQuery):
+    """Работник завершил сборку → уведомить пчеловода."""
+    if not WORKER_CHAT_IDS or callback.from_user.id not in WORKER_CHAT_IDS:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    order_id = int(callback.data.split(":")[2])
+    if not _worker_crm:
+        await callback.answer("⚠️ CRM недоступна.", show_alert=True)
+        return
+    try:
+        order = await _worker_crm.get_order(order_id)
+        # Отметить «Наличие проверено» в чеклисте CRM
+        await _worker_crm.update_order_checklist(order_id, stock_checked=True)
+        worker_agent.clear_checklist(callback.from_user.id, order_id)
+
+        # Уведомить пчеловода
+        from src.notifications import _worker_notifier
+        if _worker_notifier:
+            await _worker_notifier.notify_workers_assembled(order_id, order.number or str(order_id))
+
+        await callback.answer("📦 Пчеловод уведомлён!", show_alert=True)
+    except Exception as e:
+        logger.error("Ошибка завершения сборки: %s", e)
+        await callback.answer("❌ Ошибка. Попробуйте ещё раз.", show_alert=True)
+        return
+
+    # Вернуться к очереди
+    await _worker_show_queue(callback.message.chat.id, callback)
+
+
+async def _worker_show_order(callback: types.CallbackQuery, order_id: int) -> None:
+    """Показать карточку заказа с чеклистом."""
+    if not _worker_crm:
+        await callback.message.edit_text("⚠️ CRM недоступна.")
+        return
+    try:
+        order = await _worker_crm.get_order(order_id)
+        items = await _worker_crm.get_order_items(order_id)
+        text = worker_agent.format_order_card(order, items, callback.from_user.id)
+        keyboard = worker_agent.build_order_keyboard(order_id, items, callback.from_user.id, order.status)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception as e:
+        logger.error("Ошибка загрузки карточки заказа %d: %s", order_id, e)
+        await callback.message.edit_text("❌ Не удалось загрузить заказ. Попробуйте ещё раз.")
 
 
 @dp.message(Command("help"))
@@ -769,7 +1114,7 @@ async def handle_question(message: types.Message, state: FSMContext):
     if ADMIN_IDS and message.from_user.id in ADMIN_IDS and message.from_user.id in _admin_mode_users:
         await bot.send_chat_action(message.chat.id, "typing")
         try:
-            response = await admin_chat_agent.chat(message.from_user.id, query)
+            response = await admin_chat_agent.chat(message.from_user.id, query, snapshot=_crm_snapshot)
             try:
                 await message.reply(response, parse_mode="Markdown")
             except Exception:
@@ -1474,6 +1819,24 @@ async def main():
 
     # Инициализировать админ-модуль (один раз, с CRM если доступна)
     setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory)
+
+    # --- Режим работника склада ---
+    if integram_client:
+        global _worker_crm
+        _worker_crm = integram_client
+        from src.notifications import Notifier
+        import src.notifications as _notif_module
+        _notif_module._worker_notifier = Notifier(bot)
+        if WORKER_CHAT_IDS:
+            logger.info("Режим работника склада включён (%d работников).", len(WORKER_CHAT_IDS))
+
+    # --- CRM Snapshot: кэш заказов с позициями ---
+    if integram_client:
+        global _crm_snapshot
+        from src.crm_snapshot import CrmSnapshot
+        _crm_snapshot = CrmSnapshot(integram_client)
+        asyncio.create_task(_crm_snapshot.run())
+        logger.info("CRM snapshot запущен (интервал %d сек).", _crm_snapshot._refresh_interval)
 
     # --- Авто-трекинг: фоновая проверка статуса отправлений ---
     order_tracker: Optional[OrderTracker] = None

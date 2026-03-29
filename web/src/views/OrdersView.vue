@@ -54,6 +54,7 @@
         paginator
         :rows="50"
         :total-records="totalRecords"
+        v-model:expandedRows="expandedRows"
         row-hover
         class="text-sm"
         @page="onPage"
@@ -62,6 +63,7 @@
         <template #empty>
           <div class="text-center py-8 text-gray-400">Заказов нет</div>
         </template>
+        <Column expander style="width:3rem" />
         <Column field="number" header="Номер" sortable style="width:120px" />
         <Column field="client_name" header="Клиент" sortable>
           <template #body="{ data }">{{ data.client_name || `Клиент #${data.client_id}` }}</template>
@@ -98,19 +100,43 @@
             <span v-else class="text-gray-300">—</span>
           </template>
         </Column>
+        <template #expansion="{ data }">
+          <div class="px-4 py-2">
+            <div v-if="!data.items" class="text-sm text-gray-400">Загрузка состава...</div>
+            <div v-else-if="data.items.length === 0" class="text-sm text-gray-400">Позиции не найдены в CRM</div>
+            <table v-else class="text-sm w-full">
+              <thead>
+                <tr class="text-gray-500 text-xs">
+                  <th class="text-left pb-1 font-medium">Товар</th>
+                  <th class="text-right pb-1 font-medium w-16">Кол-во</th>
+                  <th class="text-right pb-1 font-medium w-24">Цена</th>
+                  <th class="text-right pb-1 font-medium w-24">Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in data.items" :key="item.id" class="border-t border-gray-100">
+                  <td class="py-1 text-gray-700">{{ item.product_name || `Товар #${item.product_id}` }}</td>
+                  <td class="py-1 text-right text-gray-600">{{ item.quantity }} шт</td>
+                  <td class="py-1 text-right text-gray-600">{{ formatMoney(item.unit_price) }}</td>
+                  <td class="py-1 text-right font-medium">{{ formatMoney(item.total) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
       </DataTable>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import Button from 'primevue/button'
 import Select from 'primevue/select'
-import { getOrders, getReference, exportOrders } from '../api.js'
+import { getOrders, getReference, exportOrders, getOrderItems } from '../api.js'
 import StatusBadge from '../components/StatusBadge.vue'
 import { formatDate, formatMoney } from '../utils.js'
 
@@ -123,6 +149,22 @@ const filterStatus = ref('')
 const filterSource = ref('')
 const statusOptions = ref([])
 const sourceOptions = ref([])
+const expandedRows = ref({})
+
+watch(expandedRows, async (val) => {
+  for (const orderId of Object.keys(val)) {
+    const order = orders.value.find(o => String(o.id) === orderId)
+    if (order && order.items === undefined) {
+      order.items = null
+      try {
+        const items = await getOrderItems(Number(orderId))
+        order.items = Array.isArray(items) ? items : (items.items ?? [])
+      } catch {
+        order.items = []
+      }
+    }
+  }
+})
 
 onMounted(async () => {
   const ref_ = await getReference()

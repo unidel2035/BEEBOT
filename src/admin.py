@@ -140,6 +140,7 @@ async def cmd_order_detail(message: types.Message) -> None:
     try:
         await _crm.authenticate()
         order = await _crm.get_order(order_id)
+        order.items = await _crm.get_order_items(order_id)
     except IntegramNotFoundError:
         await message.answer(f"Заказ #{order_id} не найден.")
         return

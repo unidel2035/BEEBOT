@@ -89,3 +89,10 @@ MEMORY_DB_PATH = DATA_DIR / "memory.db"
 # DEVBOT — автономный разработчик (на hive, доступен через SSH-туннель)
 # Туннель: groq-tunnel -R 8091:localhost:8091 пробрасывает VPS:8091 → hive:8091
 DEVBOT_API_URL = os.getenv("DEVBOT_API_URL", "http://localhost:8091")
+
+# Telegram ID работников склада (сборка заказов)
+# Несколько ID через запятую: WORKER_CHAT_IDS=123456789,987654321
+_workers_raw = os.getenv("WORKER_CHAT_IDS", "")
+WORKER_CHAT_IDS: frozenset[int] = frozenset(
+    int(x.strip()) for x in _workers_raw.split(",") if x.strip().isdigit()
+)

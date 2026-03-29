@@ -413,6 +413,31 @@ async def sync_uds_transaction(
     if bot and notify_chat_id:
         await _notify_beekeeper(bot, notify_chat_id, order, client, transaction)
 
+    # 5. Уведомить работников склада
+    try:
+        from src.notifications import _worker_notifier
+        if _worker_notifier:
+            item_lines = []
+            for i in items:
+                if isinstance(i, dict):
+                    pid = i.get("product_id", "?")
+                    name_str = i.get("name", f"Товар #{pid}")
+                    qty = i.get("quantity", 1)
+                else:
+                    name_str = getattr(i, "product_name", None) or f"Товар #{getattr(i, 'product_id', '?')}"
+                    qty = getattr(i, "quantity", 1)
+                item_lines.append(f"  • {name_str} × {qty} шт")
+            items_summary = "\n".join(item_lines)
+            await _worker_notifier.notify_workers_new_order(
+                order_id=order.id,
+                order_number=order.number,
+                client_name=name,
+                items_summary=items_summary,
+                total=total,
+            )
+    except Exception as _e:
+        logger.warning("UDS: не удалось уведомить работников склада: %s", _e)
+
 
 async def _get_or_create_client_by_phone(
     integram_client: Any,
@@ -528,9 +553,9 @@ class UDSPoller:
         asyncio.create_task(poller.run())
     """
 
-    # Дата, начиная с которой синхронизируем UDS → CRM (10-значные ID).
-    # Все транзакции до этой даты — из файла пчеловода (7-значные ID).
-    _SYNC_SINCE = datetime(2026, 3, 17, tzinfo=timezone.utc)
+    # Дата, начиная с которой синхронизируем UDS → CRM.
+    # UDS начал использоваться с сентября 2024; берём с запасом от 01.01.2024.
+    _SYNC_SINCE = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
     def __init__(
         self,
@@ -595,11 +620,12 @@ class UDSPoller:
             if not self._dedup.is_new(tx):
                 continue
             try:
+                # Исторический catch-up — без уведомлений
                 await sync_uds_transaction(
                     tx,
                     self._integram,
-                    notify_chat_id=self._notify_chat_id,
-                    bot=self._bot,
+                    notify_chat_id=None,
+                    bot=None,
                 )
                 self._dedup.mark_seen(tx["id"])
                 new_count += 1

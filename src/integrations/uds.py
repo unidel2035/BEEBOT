@@ -553,9 +553,9 @@ class UDSPoller:
         asyncio.create_task(poller.run())
     """
 
-    # Дата, начиная с которой синхронизируем UDS → CRM (10-значные ID).
-    # Все транзакции до этой даты — из файла пчеловода (7-значные ID).
-    _SYNC_SINCE = datetime(2026, 3, 17, tzinfo=timezone.utc)
+    # Дата, начиная с которой синхронизируем UDS → CRM.
+    # UDS начал использоваться с сентября 2024; берём с запасом от 01.01.2024.
+    _SYNC_SINCE = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
     def __init__(
         self,

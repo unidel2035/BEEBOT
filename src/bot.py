@@ -82,6 +82,9 @@ admin_chat_agent = AdminChatAgent(
 
 # setup_admin() вызывается в main() — один раз, после подключения CRM
 
+# CRM snapshot — кэш заказов с позициями (обновляется в фоне)
+_crm_snapshot: Optional["CrmSnapshot"] = None  # type: ignore[name-defined]
+
 # Хранилище задач таймаута (user_id → asyncio.Task)
 _timeout_lock = asyncio.Lock()
 _timeout_tasks: dict[int, asyncio.Task] = {}
@@ -160,10 +163,12 @@ BTN_QUEUE      = "📦 Очередь склада"
 BTN_VIEW_USER  = "👤 Глазами клиента"
 BTN_VIEW_WORK  = "👷 Глазами работника"
 BTN_BACK_ADMIN = "🔙 Режим Админа"
+BTN_REFRESH    = "🔄 Обновить CRM"
 
 ALL_MENU_BTNS = {
     BTN_ASK, BTN_PRODUCTS, BTN_ORDER, BTN_INSPECT, BTN_VOICE, BTN_HELP,
-    BTN_STATS, BTN_ADMIN, BTN_QUEUE, BTN_VIEW_USER, BTN_VIEW_WORK, BTN_BACK_ADMIN,
+    BTN_STATS, BTN_ADMIN, BTN_QUEUE, BTN_VIEW_USER, BTN_VIEW_WORK,
+    BTN_BACK_ADMIN, BTN_REFRESH,
 }
 
 # Текущий вид для каждого администратора: "admin" | "user" | "worker"
@@ -194,7 +199,7 @@ def _build_main_keyboard(is_admin: bool = False, view: str = "admin") -> ReplyKe
         [KeyboardButton(text=BTN_ASK), KeyboardButton(text=BTN_PRODUCTS), KeyboardButton(text=BTN_ORDER)],
         [KeyboardButton(text=BTN_INSPECT), KeyboardButton(text=BTN_VOICE), KeyboardButton(text=BTN_HELP)],
         [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_ADMIN), KeyboardButton(text=BTN_QUEUE)],
-        [KeyboardButton(text=BTN_VIEW_USER), KeyboardButton(text=BTN_VIEW_WORK)],
+        [KeyboardButton(text=BTN_VIEW_USER), KeyboardButton(text=BTN_VIEW_WORK), KeyboardButton(text=BTN_REFRESH)],
     ]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
@@ -377,6 +382,29 @@ async def btn_back_to_admin(message: types.Message):
         parse_mode="Markdown",
         reply_markup=_build_main_keyboard(is_admin=True, view="admin"),
     )
+
+
+@dp.message(F.text == BTN_REFRESH)
+@dp.message(Command("refresh_crm"))
+async def btn_refresh_crm(message: types.Message):
+    """Принудительное обновление CRM snapshot (только админ)."""
+    if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
+        return
+    if not _crm_snapshot:
+        await message.answer("⚠️ CRM snapshot не инициализирован.")
+        return
+    msg = await message.answer("🔄 Обновляю снимок CRM...")
+    try:
+        await _crm_snapshot.refresh()
+        await msg.edit_text(
+            f"✅ Снимок CRM обновлён\n"
+            f"📦 Заказов: {len(_crm_snapshot.orders)}\n"
+            f"👥 Клиентов: {len(_crm_snapshot.clients)}\n"
+            f"🍯 Товаров: {len(_crm_snapshot.products)}\n"
+            f"⏱ {_crm_snapshot.age_str}"
+        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка обновления: {e}")
 
 
 @dp.message(Command("queue"))
@@ -1086,7 +1114,7 @@ async def handle_question(message: types.Message, state: FSMContext):
     if ADMIN_IDS and message.from_user.id in ADMIN_IDS and message.from_user.id in _admin_mode_users:
         await bot.send_chat_action(message.chat.id, "typing")
         try:
-            response = await admin_chat_agent.chat(message.from_user.id, query)
+            response = await admin_chat_agent.chat(message.from_user.id, query, snapshot=_crm_snapshot)
             try:
                 await message.reply(response, parse_mode="Markdown")
             except Exception:
@@ -1793,13 +1821,22 @@ async def main():
     setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory)
 
     # --- Режим работника склада ---
-    if WORKER_CHAT_IDS and integram_client:
+    if integram_client:
         global _worker_crm
         _worker_crm = integram_client
         from src.notifications import Notifier
         import src.notifications as _notif_module
         _notif_module._worker_notifier = Notifier(bot)
-        logger.info("Режим работника склада включён (%d работников).", len(WORKER_CHAT_IDS))
+        if WORKER_CHAT_IDS:
+            logger.info("Режим работника склада включён (%d работников).", len(WORKER_CHAT_IDS))
+
+    # --- CRM Snapshot: кэш заказов с позициями ---
+    if integram_client:
+        global _crm_snapshot
+        from src.crm_snapshot import CrmSnapshot
+        _crm_snapshot = CrmSnapshot(integram_client)
+        asyncio.create_task(_crm_snapshot.run())
+        logger.info("CRM snapshot запущен (интервал %d сек).", _crm_snapshot._refresh_interval)
 
     # --- Авто-трекинг: фоновая проверка статуса отправлений ---
     order_tracker: Optional[OrderTracker] = None

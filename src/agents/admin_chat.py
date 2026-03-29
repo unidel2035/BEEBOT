@@ -207,12 +207,20 @@ class AdminChatAgent:
                     time.sleep(2 ** attempt)
         return "⚠️ Не удалось получить ответ. Попробуй ещё раз."
 
-    async def chat(self, user_id: int, message: str) -> str:
-        """Обработать сообщение пчеловода и вернуть ответ."""
+    async def chat(self, user_id: int, message: str, snapshot=None) -> str:
+        """Обработать сообщение пчеловода и вернуть ответ.
+
+        snapshot: CrmSnapshot — если передан и актуален, использует
+                  предзагруженные данные вместо live-запросов к CRM.
+        """
         if not self._groq:
             return "⚠️ LLM не настроен. Проверь GROQ_API_KEY в .env"
 
-        crm_context = await self._get_crm_context()
+        if snapshot and snapshot.is_ready:
+            crm_context = await self._build_context_from_snapshot(snapshot)
+        else:
+            crm_context = await self._get_crm_context()
+
         system = _SYSTEM.format(
             crm_context=crm_context,
             today=datetime.now().strftime("%d.%m.%Y"),
@@ -233,6 +241,112 @@ class AdminChatAgent:
         self._history[user_id] = updated[-20:]
 
         return answer
+
+    async def _build_context_from_snapshot(self, snapshot) -> str:
+        """Собрать текстовый снимок CRM из предзагруженного CrmSnapshot (без API-запросов)."""
+        lines = []
+        orders = snapshot.orders
+
+        # --- Заказы ---
+        active = [o for o in orders if o.status in ("Новый", "Подтверждён", "В сборке")]
+        revenue_total = sum((o.total or 0) for o in orders)
+        lines.append(f"ЗАКАЗЫ: {len(orders)} всего, {len(active)} активных, выручка {revenue_total:,.0f} ₽")
+
+        # Помесячная статистика
+        monthly: dict[str, dict] = defaultdict(lambda: {"count": 0, "revenue": 0.0})
+        _RU = {"01": "Янв", "02": "Фев", "03": "Мар", "04": "Апр", "05": "Май", "06": "Июн",
+               "07": "Июл", "08": "Авг", "09": "Сен", "10": "Окт", "11": "Ноя", "12": "Дек"}
+        for o in orders:
+            try:
+                dt = o.date if isinstance(o.date, datetime) else datetime.fromisoformat(str(o.date))
+                if dt.year < 2020:
+                    continue
+                key = dt.strftime("%Y-%m")
+                monthly[key]["count"] += 1
+                monthly[key]["revenue"] += o.total or 0
+            except Exception:
+                continue
+        if monthly:
+            lines.append("Статистика по месяцам:")
+            for ym in sorted(monthly)[-6:]:
+                y, m = ym.split("-")
+                label = f"{_RU.get(m, m)} {y}"
+                d = monthly[ym]
+                lines.append(f"  {label}: {d['count']} заказ., {d['revenue']:,.0f} ₽")
+
+        # Подневная статистика за последние 7 дней
+        valid = [o for o in orders if _valid_date(o)]
+        today_date = datetime.now().date()
+        daily: dict[str, dict] = defaultdict(lambda: {"count": 0, "revenue": 0.0, "sources": defaultdict(int)})
+        for o in valid:
+            try:
+                dt = o.date if isinstance(o.date, datetime) else datetime.fromisoformat(str(o.date))
+                delta = (today_date - dt.date()).days
+                if 0 <= delta <= 6:
+                    key = dt.strftime("%d.%m")
+                    daily[key]["count"] += 1
+                    daily[key]["revenue"] += o.total or 0
+                    src = o.source or "неизвестно"
+                    daily[key]["sources"][src] += 1
+            except Exception:
+                continue
+        if daily:
+            lines.append("Заказы за последние 7 дней (дата | кол-во | выручка | источники):")
+            for day in sorted(daily, key=lambda d: datetime.strptime(d, "%d.%m").replace(year=today_date.year), reverse=True):
+                d = daily[day]
+                src_str = ", ".join(f"{s}: {n}" for s, n in sorted(d["sources"].items(), key=lambda x: -x[1]))
+                lines.append(f"  {day}: {d['count']} заказ., {d['revenue']:,.0f} ₽ | {src_str}")
+
+        # Последние 20 заказов с позициями (уже загружены в снимке)
+        recent = list(reversed(valid[-20:])) if valid else []
+        if recent:
+            lines.append("Последние 20 заказов (номер | дата | статус | источник | сумма | товары):")
+            for o in recent:
+                try:
+                    dt = o.date if isinstance(o.date, datetime) else datetime.fromisoformat(str(o.date))
+                    date_str = dt.strftime("%d.%m.%Y")
+                except Exception:
+                    date_str = "—"
+                order_items = getattr(o, "items", []) or []
+                if order_items:
+                    items_str = ", ".join(
+                        f"{i.product_name or 'позиция'} ×{i.quantity}" for i in order_items
+                    )
+                else:
+                    items_str = "нет позиций в CRM"
+                source_str = o.source or "—"
+                lines.append(f"  #{o.number} | {date_str} | {o.status} | {source_str} | {o.total or 0:.0f} ₽ | {items_str}")
+
+        # Топ-10 товаров по суммарному количеству (из снимка)
+        try:
+            from collections import Counter
+            product_counts: Counter = Counter()
+            for o in orders:
+                for item in (getattr(o, "items", []) or []):
+                    name = item.product_name or "неизвестно"
+                    product_counts[name] += item.quantity
+            top = product_counts.most_common(10)
+            if top:
+                lines.append("Топ-10 товаров по суммарному количеству в заказах:")
+                for name, qty in top:
+                    lines.append(f"  {name}: {qty} шт.")
+        except Exception:
+            pass
+
+        # --- Товары / склад ---
+        products = snapshot.products
+        low = [p for p in products if p.stock is not None and p.stock < 5]
+        lines.append(f"ТОВАРЫ: {len(products)} позиций")
+        if low:
+            lines.append("Мало на складе (<5 шт.):")
+            for p in low[:7]:
+                lines.append(f"  {p.name}: {p.stock} шт.")
+
+        # --- Клиенты ---
+        lines.append(f"КЛИЕНТЫ: {len(snapshot.clients)} в базе")
+
+        lines.append(f"\n(Снимок CRM: {snapshot.age_str})")
+        return "\n".join(lines)
 
     def clear_history(self, user_id: int) -> None:
         """Очистить историю диалога пользователя."""

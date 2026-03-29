@@ -620,11 +620,12 @@ class UDSPoller:
             if not self._dedup.is_new(tx):
                 continue
             try:
+                # Исторический catch-up — без уведомлений
                 await sync_uds_transaction(
                     tx,
                     self._integram,
-                    notify_chat_id=self._notify_chat_id,
-                    bot=self._bot,
+                    notify_chat_id=None,
+                    bot=None,
                 )
                 self._dedup.mark_seen(tx["id"])
                 new_count += 1

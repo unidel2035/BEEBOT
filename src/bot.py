@@ -148,32 +148,54 @@ BOT_USERNAME = "AleksandrDmitrov_BEEBOT"
 # Тексты кнопок главного меню — используются и при построении клавиатуры,
 # и при сопоставлении входящих текстов с обработчиками.
 # ---------------------------------------------------------------------------
-BTN_ASK      = "💬 Спросить"
-BTN_PRODUCTS = "📦 Продукты"
-BTN_ORDER    = "🛒 Заказать"
-BTN_INSPECT  = "🔍 Осмотр улья"
-BTN_VOICE    = "🎙 Голос Улья"
-BTN_HELP     = "❓ Помощь"
-BTN_STATS    = "📊 Статистика"
-BTN_ADMIN    = "🤖 Ассистент"
-BTN_QUEUE    = "📦 Очередь склада"
+BTN_ASK        = "💬 Спросить"
+BTN_PRODUCTS   = "📦 Продукты"
+BTN_ORDER      = "🛒 Заказать"
+BTN_INSPECT    = "🔍 Осмотр улья"
+BTN_VOICE      = "🎙 Голос Улья"
+BTN_HELP       = "❓ Помощь"
+BTN_STATS      = "📊 Статистика"
+BTN_ADMIN      = "🤖 Ассистент"
+BTN_QUEUE      = "📦 Очередь склада"
+BTN_VIEW_USER  = "👤 Глазами клиента"
+BTN_VIEW_WORK  = "👷 Глазами работника"
+BTN_BACK_ADMIN = "🔙 Режим Админа"
 
-ALL_MENU_BTNS = {BTN_ASK, BTN_PRODUCTS, BTN_ORDER, BTN_INSPECT,
-                 BTN_VOICE, BTN_HELP, BTN_STATS, BTN_ADMIN, BTN_QUEUE}
+ALL_MENU_BTNS = {
+    BTN_ASK, BTN_PRODUCTS, BTN_ORDER, BTN_INSPECT, BTN_VOICE, BTN_HELP,
+    BTN_STATS, BTN_ADMIN, BTN_QUEUE, BTN_VIEW_USER, BTN_VIEW_WORK, BTN_BACK_ADMIN,
+}
+
+# Текущий вид для каждого администратора: "admin" | "user" | "worker"
+_admin_view_mode: dict[int, str] = {}
 
 
-def _build_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    """Постоянная нижняя клавиатура. Для админов добавляется 3-я строка."""
+def _build_main_keyboard(is_admin: bool = False, view: str = "admin") -> ReplyKeyboardMarkup:
+    """Постоянная нижняя клавиатура.
+
+    view="admin"  — полный режим администратора
+    view="user"   — вид глазами клиента (+ кнопка возврата)
+    view="worker" — вид глазами работника (только кнопка возврата)
+    """
+    if view == "user":
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text=BTN_ASK), KeyboardButton(text=BTN_PRODUCTS), KeyboardButton(text=BTN_ORDER)],
+            [KeyboardButton(text=BTN_INSPECT), KeyboardButton(text=BTN_VOICE), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_BACK_ADMIN)],
+        ], resize_keyboard=True)
+
+    if view == "worker":
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text=BTN_BACK_ADMIN)],
+        ], resize_keyboard=True)
+
+    # view == "admin"
     rows = [
         [KeyboardButton(text=BTN_ASK), KeyboardButton(text=BTN_PRODUCTS), KeyboardButton(text=BTN_ORDER)],
         [KeyboardButton(text=BTN_INSPECT), KeyboardButton(text=BTN_VOICE), KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_ADMIN), KeyboardButton(text=BTN_QUEUE)],
+        [KeyboardButton(text=BTN_VIEW_USER), KeyboardButton(text=BTN_VIEW_WORK)],
     ]
-    if is_admin:
-        rows.append([
-            KeyboardButton(text=BTN_STATS),
-            KeyboardButton(text=BTN_ADMIN),
-            KeyboardButton(text=BTN_QUEUE),
-        ])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
@@ -244,9 +266,13 @@ async def cmd_start(message: types.Message):
         await _worker_show_queue(message.chat.id, message)
         return
 
+    # Сбросить вид на "admin" при /start
+    if is_admin:
+        _admin_view_mode[uid] = "admin"
+
     await message.answer(
         WELCOME_MESSAGE,
-        reply_markup=_build_main_keyboard(is_admin=is_admin),
+        reply_markup=_build_main_keyboard(is_admin=is_admin, view="admin"),
     )
 
 
@@ -308,6 +334,49 @@ async def btn_queue(message: types.Message):
     if not ADMIN_IDS or message.from_user.id not in ADMIN_IDS:
         return
     await _worker_show_queue(message.chat.id, message)
+
+
+@dp.message(F.text == BTN_VIEW_USER)
+async def btn_view_as_user(message: types.Message):
+    """Администратор переключается в вид «Глазами клиента»."""
+    uid = message.from_user.id
+    if not ADMIN_IDS or uid not in ADMIN_IDS:
+        return
+    _admin_view_mode[uid] = "user"
+    await message.answer(
+        "👤 *Вид «Глазами клиента»*\n\nТеперь ты видишь то, что видят покупатели.\nКнопка «🔙 Режим Админа» вернёт тебя обратно.",
+        parse_mode="Markdown",
+        reply_markup=_build_main_keyboard(is_admin=True, view="user"),
+    )
+
+
+@dp.message(F.text == BTN_VIEW_WORK)
+async def btn_view_as_worker(message: types.Message):
+    """Администратор переключается в вид «Глазами работника»."""
+    uid = message.from_user.id
+    if not ADMIN_IDS or uid not in ADMIN_IDS:
+        return
+    _admin_view_mode[uid] = "worker"
+    await message.answer(
+        "👷 *Вид «Глазами работника»*\n\nПоказываю очередь сборки — как её видит работник склада.",
+        parse_mode="Markdown",
+        reply_markup=_build_main_keyboard(is_admin=True, view="worker"),
+    )
+    await _worker_show_queue(message.chat.id, message)
+
+
+@dp.message(F.text == BTN_BACK_ADMIN)
+async def btn_back_to_admin(message: types.Message):
+    """Вернуться в полный режим администратора."""
+    uid = message.from_user.id
+    if not ADMIN_IDS or uid not in ADMIN_IDS:
+        return
+    _admin_view_mode[uid] = "admin"
+    await message.answer(
+        "🔙 *Режим Админа*",
+        parse_mode="Markdown",
+        reply_markup=_build_main_keyboard(is_admin=True, view="admin"),
+    )
 
 
 @dp.message(Command("queue"))

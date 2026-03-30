@@ -31,9 +31,9 @@
 
 | Место | Статус | Последний коммит |
 |-------|--------|-----------------|
-| upstream/main | ✅ актуален | PR #111 docs: эволюция архитектуры |
-| hive (локально) | ⚠️ отстаёт | ветка docs-claude-md, нужен reset |
-| VPS | ⚠️ отстаёт | нужен reset + pull |
+| upstream/main | ✅ актуален | PR #115 feat: Gift Protocol + SharedContext |
+| hive (локально) | ✅ актуален | 5c9e707 (reset --hard) |
+| VPS | ✅ актуален | PR #115 задеплоен, bot polling |
 
 ### Процедура синхронизации (выполнять после каждого PR)
 
@@ -63,21 +63,13 @@ ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT && git fetch origin main &
 
 > Актуальна. Выполняется до начала Gift Protocol — иначе рефакторить монолит.
 
-### 8.1 Разбить bot.py на Router-модули
+### 8.1 Разбить bot.py на Router-модули ✅ (PR #114, 30.03.2026)
 
 **Проблема:** `src/bot.py` 1 899 строк — все роли в одном файле.
 
-```
-src/routers/
-├── user.py       # /start, /help, /products, /ask, /voice, /cancel
-├── worker.py     # worker:queue, worker:order:*, worker:take:*, worker:done:*
-├── admin.py      # /admin, /stats, /faq, /yt_check, /yt_update, /dev
-└── fsm_order.py  # OrderFSM + InspectFSM хэндлеры
-```
-
-- [ ] Создать `src/routers/` с 4 файлами
-- [ ] Перенести хэндлеры из bot.py в соответствующие роутеры
-- [ ] bot.py → только startup/shutdown + `dp.include_router()`
+- [x] Создать `src/routers/` с 6 файлами (user, worker, inspect, fsm_order, bot_admin, keyboards)
+- [x] Перенести хэндлеры из bot.py в соответствующие роутеры
+- [x] bot.py → 213 строк (startup/shutdown + `dp.include_router()`)
 
 ### 8.2 Убрать дублирование AdminChatAgent
 
@@ -118,72 +110,26 @@ ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT \
 > Три шага эволюции: не переписывание, а наслоение поверх существующего кода.
 > Подробнее: [docs/architecture.md §10](docs/architecture.md)
 
-### 9.1 SharedContext — рабочая память (шаг 1)
+### 9.1 SharedContext — рабочая память (шаг 1) ✅ (PR #115, 30.03.2026)
 
-**Что:** единый `dict` + TTL на user_id. Заменяет `_dialog_states` + `_histories` + разрозненные факты.
+- [x] Создать `src/shared_context.py` (UserContext + SharedContextStore, ~75 строк)
+- [x] Заменить `_histories` в оркестраторе на SharedContextStore
+- [x] GiftBroker обновляет SharedContext историей диалога после каждого ответа
 
-```python
-# src/shared_context.py — ~100 строк
-@dataclass
-class UserContext:
-    user_id: int
-    dialog_history: list[dict]     # последние 5 пар
-    active_order: dict | None      # текущий заказ в FSM
-    health_facts: list[str]        # из SQLite + Integram
-    interests: list[str]           # упомянутые продукты
-    last_products_hint: list[str]  # из онтологии
-    updated_at: float
-```
+### 9.2 CrmAgent — единственный владелец CRM (шаг 2) ✅ (PR #115, 30.03.2026)
 
-- [ ] Создать `src/shared_context.py`
-- [ ] Перенести `_dialog_states` и `_histories` из orchestrator.py → SharedContext
-- [ ] Передавать SharedContext в каждый агент вместо разрозненных параметров
+- [x] Создать `src/crm_agent.py` (обёртка над IntegramClient, ~70 строк)
+- [x] `get_client_by_telegram_id`, `get_orders_for_user`, `add_health_fact`, `get_products`
+- [x] Заменяет inline `async with IntegramClient()` в оркестраторе
+- [ ] Перенаправить оставшиеся 10+ прямых вызовов через CrmAgent (постепенная миграция)
 
-### 9.2 CrmAgent — единственный владелец CRM (шаг 2)
+### 9.3 Gift TypedDict + GiftBroker (шаг 3) ✅ (PR #115, 30.03.2026)
 
-**Проблема:** IntegramClient вызывается из 10+ мест напрямую.
-**Решение:** один класс `CrmAgent`, все остальные идут только через него.
-
-```python
-# src/crm_agent.py — ~150 строк
-class CrmAgent:
-    """Единственный владелец CRM-домена. Все вызовы к Integram — только через него."""
-    async def get_orders(self, filters=None) → list[Order]: ...
-    async def create_order(self, order_data: dict) → Order: ...
-    async def update_status(self, order_id: int, status: str) → None: ...
-    async def add_health_fact(self, user_id: int, fact: str) → None: ...
-    async def get_client_history(self, user_id: int) → ClientHistory: ...
-```
-
-- [ ] Создать `src/crm_agent.py` как обёртку над `integram_client.py`
-- [ ] Перенаправить все 10+ прямых вызовов IntegramClient через CrmAgent
-- [ ] Integram недоступен → CrmAgent: DEFERRED + retry очередь (asyncio.Queue)
-
-### 9.3 Gift TypedDict + GiftBroker (шаг 3)
-
-**Что:** `Gift` как TypedDict на 5 полей. `GiftBroker` заменяет `Orchestrator._build_graph()`.
-LangGraph остаётся внутри — просто получает обогащённый контекст из SharedContext.
-
-```python
-# src/gift_protocol.py — ~200 строк
-class Gift(TypedDict):
-    giver: str
-    receiver: str
-    content: dict
-    context: dict          # из SharedContext — уже обогащённый
-    telos: str             # зачем этот дар
-    anamnesis: list[dict]  # прошлые значимые дары (A3)
-    freedom: str           # ACCEPTED | DEFERRED | DECLINED
-
-class GiftBroker:
-    """Знает SharedContext. Матчит потребности. Доставляет дары."""
-    async def send(self, gift: Gift) → Gift: ...
-    async def defer(self, gift: Gift, ttl: int) → None: ...
-```
-
-- [ ] Создать `src/gift_protocol.py`
-- [ ] GiftBroker как надстройка над Orchestrator (не замена сразу)
-- [ ] Логировать каждый Gift → audit log = полная история события
+- [x] Создать `src/gift_protocol.py` (Gift TypedDict + GiftBroker, ~100 строк)
+- [x] Gift: giver, receiver, content, context, telos, anamnesis, freedom, timestamp
+- [x] GiftBroker.send(): собирает анамнез → orchestrator.route() → обновляет SharedContext
+- [x] user.py использует GiftBroker (fallback на прямой вызов если не инжектирован)
+- [x] Логирование каждого Gift (DEBUG уровень)
 
 ### 9.4 WorkerAgent: inbox + DEFERRED
 
@@ -222,28 +168,24 @@ ssh ai-agent@185.233.200.13 "docker logs --tail 20 beebot"
 
 ## Фаза 10: Память и персонализация (P2)
 
-### 10.1 AnamnesisCache — эпизодическая память (A3)
+### 10.1 AnamnesisCache — эпизодическая память (A3) ✅ (PR #115, 30.03.2026)
 
-> A3 Gift Ontology: прошлые дары со-присутствуют в новом.
-> Broker включает `anamnesis[]` в каждый Gift — агент получает контекст истории.
+- [x] `src/anamnesis.py`: агрегирует SQLite-факты + историю заказов из CrmAgent
+- [x] `format_for_llm()` → строка «Прошлые заказы: #42 — Доставлен, 2800 ₽»
+- [x] GiftBroker включает anamnesis[] в каждый Gift автоматически
+- [x] orchestrator._node_beebot добавляет anamnesis_hint в memory_facts (10.3)
+- [ ] Logist: если есть история → предзаполнять адрес, пропускать шаги
 
-- [ ] `src/anamnesis.py`: кэш значимых прошлых взаимодействий на user_id
-- [ ] Источники: SQLite (факты) + CrmAgent (история заказов) + FAQ (темы интереса)
-- [ ] GiftBroker собирает anamnesis автоматически перед отправкой Gift Beebot/Logist
-- [ ] Logist: если есть история заказов → предзаполнять адрес, пропускать шаги
+### 10.2 extract_fact — устранение ложных срабатываний ✅ (PR #115, 30.03.2026)
 
-### 10.2 extract_fact — устранение ложных срабатываний
+- [x] Добавить детектор отрицаний в `memory.py:extract_fact()`
+- [x] Паттерн: `нет|не|без|никогда|не было|не страдаю|...` → skip предложение
 
-**Проблема:** «у меня нет язвы» → сохраняется как health-факт «язва».
+### 10.3 Персонализация: «Вы уже брали» ✅ (PR #115, 30.03.2026)
 
-- [ ] Добавить детектор отрицаний в `memory.py:extract_fact()`
-- [ ] Паттерны: «нет», «не было», «не страдаю», «не болею» → skip
-
-### 10.3 Персонализация: «Вы уже брали»
-
-- [ ] Консультант: при consult — проверить историю заказов через CrmAgent
-- [ ] Если купил X → рекомендовать Y из онтологии
-- [ ] «Хотите повторить заказ от 15 марта?» при ключевых словах
+- [x] orchestrator._node_beebot: AnamnesisCache → history hint → memory_facts консультанта
+- [ ] «Хотите повторить заказ от 15 марта?» при ключевых словах (отдельная задача)
+- [ ] Logist: предзаполнять адрес из истории заказов
 
 ### 10.4 YouTube-комментарии в KB
 

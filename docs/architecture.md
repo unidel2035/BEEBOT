@@ -1,6 +1,6 @@
 # BEEBOT — Архитектурные диаграммы
 
-> **Версия:** 29 марта 2026
+> **Версия:** 30 марта 2026 · Добавлен раздел 10: Эволюция архитектуры (было → станет)
 
 ---
 
@@ -485,6 +485,299 @@ erDiagram
 | Аналитик | Groq | ~3000 | Анализ CRM-статистики |
 | DEVBOT Analyzer | Claude API (Sonnet) | ~2000 | Анализ задачи → план |
 | DEVBOT Executor | Claude Code CLI | ~20000+ | Реализация задачи |
+
+---
+
+*Связанные документы: [analysis.md](../analysis.md) · [plan.md](../plan.md)*
+
+---
+
+## 10. Эволюция архитектуры: было → станет
+
+> Раздел описывает переход к **Gift Protocol + CRM-агент + SharedContext**.
+> Сформулировано 30 марта 2026 на основе анализа роста проекта и принципов dronedoc2026 AgentBus.
+
+---
+
+### 10.1 Было: CRM как общий ресурс
+
+Сейчас `IntegramClient` вызывается напрямую из 10+ мест. Нет единого владельца CRM-домена.
+
+```mermaid
+graph TB
+    subgraph bot_py["bot.py (1899 строк) — центр всего"]
+        BOT[Хэндлеры<br/>FSM-логика<br/>WorkerAgent-вызовы<br/>AdminChat-вызовы]
+    end
+
+    subgraph agents["Агенты"]
+        ORCH[Orchestrator<br/>роутер intent→агент]
+        BEEBOT[BeebotAgent]
+        LOGIST[LogistAgent FSM]
+        WORKER[WorkerAgent<br/>_checked dict в RAM]
+        ADMIN[AdminChatAgent<br/>CrmSnapshot]
+        TRACKER[Tracker]
+        UDS[UDSPoller]
+    end
+
+    MSG[📱 Telegram] --> BOT
+    BOT -->|direct| ORCH
+    BOT -->|direct| WORKER
+    BOT -->|direct| ADMIN
+
+    ORCH -->|consult| BEEBOT
+    ORCH -->|order → passthrough| BOT
+    ORCH -->|edit/track → passthrough| BOT
+
+    BEEBOT -->|health fact| IC1[IntegramClient]
+    LOGIST -->|create_order| IC2[IntegramClient]
+    WORKER -->|get_orders<br/>update_status| IC3[IntegramClient]
+    ADMIN -->|snapshot| IC4[IntegramClient]
+    TRACKER -->|update_tracking| IC5[IntegramClient]
+    UDS -->|sync_transaction| IC6[IntegramClient]
+
+    IC1 & IC2 & IC3 & IC4 & IC5 & IC6 -->|все дёргают| CRM[(Integram CRM<br/>ai2o.ru/bibot)]
+
+    style IC1 fill:#fee2e2
+    style IC2 fill:#fee2e2
+    style IC3 fill:#fee2e2
+    style IC4 fill:#fee2e2
+    style IC5 fill:#fee2e2
+    style IC6 fill:#fee2e2
+    style CRM fill:#fca5a5
+```
+
+**Проблемы текущей схемы:**
+- Integram недоступен → падает всё и везде одновременно
+- Бизнес-логика CRM размазана по 6+ файлам
+- `bot.py` — единая точка отказа и 1899 строк монолита
+- `WorkerAgent._checked` — dict в RAM, теряется при рестарте
+- `_node_logist` в оркестраторе возвращает `""` — FSM живёт в bot.py
+
+---
+
+### 10.2 Станет: Gift Protocol + CRM-агент
+
+Единый контур с Gift Broker в центре. CRM — один агент, владеющий доменом.
+
+```mermaid
+graph TB
+    subgraph FACADES["Фасады (адаптеры внешнего мира)"]
+        TG_ADAPT[TelegramAdapter<br/>bot.py → лёгкий фасад]
+        WEB_ADAPT[WebAdapter<br/>FastAPI routers]
+        UDS_ADAPT[UdsAdapter<br/>uds.py]
+    end
+
+    subgraph CORE["Единый контур"]
+        SC[("SharedContext\n─────────────\nклиент · заказ\nфакты здоровья\nинтересы · KB-хинты\nTTL 30 мин")]
+        BROKER["GiftBroker\n─────────────\nзнает SharedContext\nматчит потребности\nдоставляет дары"]
+
+        subgraph AGENTS["Агенты-лица (ACCEPTED / DEFERRED)"]
+            BEEBOT_AG[BeebotAgent\nKB+LLM]
+            LOGIST_AG[LogistAgent\nFSM 7 шагов]
+            CRM_AG[CrmAgent\nединственный владелец]
+            WORKER_AG[WorkerAgent\ninbox + TTL]
+            NOTIFIER[NotifierAgent\nTelegram push]
+            ANALYST[AnalystAgent\nстатистика]
+            TRACKER[TrackerAgent\nСДЭК + Почта]
+        end
+    end
+
+    CRM_AG -->|единственный| INTEGRAM[(Integram CRM)]
+
+    TG_ADAPT -->|Gift| BROKER
+    WEB_ADAPT -->|Gift| BROKER
+    UDS_ADAPT -->|Gift| BROKER
+
+    BROKER <-->|read / write| SC
+    BROKER -->|Gift + telos| BEEBOT_AG
+    BROKER -->|Gift + telos| LOGIST_AG
+    BROKER -->|Gift + telos| CRM_AG
+    BROKER -->|Gift + telos| WORKER_AG
+    BROKER -->|Gift + telos| NOTIFIER
+    BROKER -->|Gift + telos| ANALYST
+    BROKER -->|Gift + telos| TRACKER
+
+    WORKER_AG -->|DEFERRED если занят| BROKER
+
+    style CRM_AG fill:#bbf7d0
+    style INTEGRAM fill:#86efac
+    style SC fill:#ddd6fe
+    style BROKER fill:#bfdbfe
+```
+
+---
+
+### 10.3 Оркестратор: роутер → Gift Broker
+
+```mermaid
+flowchart LR
+    subgraph WAS["БЫЛО"]
+        direction TB
+        A1[Сообщение] --> B1[_fast_classify]
+        B1 --> C1{intent?}
+        C1 -->|consult| D1[BeebotAgent]
+        C1 -->|order| E1[passthrough\n→ bot.py FSM]
+        C1 -->|edit/track| F1[passthrough\n→ bot.py]
+        C1 -->|stats| G1[AnalystAgent]
+        D1 -->|прямой вызов| H1[IntegramClient]
+        style E1 fill:#fee2e2
+        style F1 fill:#fee2e2
+        style H1 fill:#fee2e2
+    end
+
+    subgraph WILL["СТАНЕТ"]
+        direction TB
+        A2[Gift от фасада] --> B2[GiftBroker]
+        B2 <-->|обогащение| SC2[SharedContext\nфакты Марии\nпрошлые заказы\nздоровье]
+        B2 -->|Gift + telos| D2[BeebotAgent\nACCEPTED]
+        B2 -->|Gift + telos| E2[LogistAgent\nACCEPTED]
+        B2 -->|Gift + telos| F2[CrmAgent\nACCEPTED / DEFERRED]
+        D2 -->|new_fact| B2
+        E2 -->|order_created| B2
+        B2 -->|Gift| G2[WorkerAgent\nNotifier\nAnalyst]
+        style SC2 fill:#ddd6fe
+        style D2 fill:#bbf7d0
+        style E2 fill:#bbf7d0
+        style F2 fill:#bbf7d0
+    end
+```
+
+---
+
+### 10.4 WorkerAgent: RAM → DEFERRED + SharedContext
+
+```mermaid
+stateDiagram-v2
+    state "БЫЛО (чеклист в RAM)" as WAS {
+        [*] --> queue_was : /start
+        queue_was --> card_was : выбрать заказ
+        card_was --> checklist_was : Взять в работу
+        checklist_was --> done_was : все ✅
+        done_was --> [*]
+        note right of checklist_was
+            _checked: dict в RAM
+            ⚠️ теряется при рестарте
+        end note
+    }
+
+    state "СТАНЕТ (inbox + DEFERRED)" as WILL {
+        [*] --> idle : старт
+        idle --> busy : Gift(order) ACCEPTED
+        busy --> idle : заказ собран
+        idle --> deferred : Gift(order) DEFERRED\n(работник занят)
+        deferred --> busy : broker доставляет\nкогда освободился
+        note right of deferred
+            Inbox с TTL в SharedContext
+            Broker ждёт сигнала готовности
+            ✅ переживает рестарт
+        end note
+        note right of busy
+            Чеклист в SharedContext
+            не в RAM
+        end note
+    }
+```
+
+---
+
+### 10.5 Сквозной сценарий: Мария заказывает прополис
+
+```mermaid
+sequenceDiagram
+    actor Мария
+    participant TG as TelegramAdapter
+    participant Broker as GiftBroker
+    participant SC as SharedContext
+    participant Beebot as BeebotAgent
+    participant Logist as LogistAgent
+    participant CRM as CrmAgent
+    participant Worker as WorkerAgent
+    participant Notifier as NotifierAgent
+
+    Мария->>TG: «У меня болят суставы»
+    TG->>Broker: Gift(content, telos=помочь)
+    Broker->>SC: читать факты Марии → пусто
+    Broker->>Broker: онтология: суставы→прополис
+    Broker->>Beebot: Gift(+контекст онтологии) ACCEPTED?
+    Beebot-->>Broker: ACCEPTED
+    Beebot->>Beebot: FAISS → видео про прополис
+    Beebot-->>Broker: Gift(ответ, new_fact=суставы, hint=прополис30мл)
+    Broker->>SC: записать факт здоровья Марии
+    Broker->>TG: ответ Марии
+
+    Мария->>TG: «Хочу заказать прополис 30мл»
+    TG->>Broker: Gift(content)
+    Broker->>SC: читать → суставы + hint=прополис30мл
+    Broker->>Logist: Gift(+продукт уже известен) ACCEPTED?
+    Logist-->>Broker: ACCEPTED
+    Note over Logist: пропускает шаг выбора товара
+    Logist->>CRM: Gift(create_order) ACCEPTED?
+    CRM-->>Logist: ACCEPTED → заказ #923
+    Logist-->>Broker: Gift(order_created #923)
+    Broker->>SC: обновить статус заказа Марии
+
+    par параллельно
+        Broker->>Notifier: Gift(новый заказ #923) ACCEPTED
+        Notifier->>Мария: подтверждение
+    and
+        Broker->>Worker: Gift(заказ #923) DEFERRED
+        Note over Worker: занят #921
+    end
+
+    Note over Worker: #921 завершён
+    Worker-->>Broker: готов
+    Broker->>Worker: доставить отложенный Gift #923 ACCEPTED
+    Worker->>Worker: чеклист → собрать
+    Worker-->>Broker: Gift(собран #923)
+    Broker->>CRM: Gift(update_status → Отправлен)
+    Broker->>Analyst: Gift(продажа: прополис ← суставы) ACCEPTED
+```
+
+---
+
+### 10.6 Сравнение: было vs станет
+
+| Аспект | Было | Станет |
+|--------|------|--------|
+| **Orchestrator** | Роутер: intent → агент → END | Gift Broker: знает SharedContext, матчит telos |
+| **CRM-доступ** | 10+ прямых вызовов IntegramClient | Один CrmAgent — единственный владелец |
+| **SharedContext** | Частичный: history + SQLite | Единый: клиент · заказ · здоровье · интересы |
+| **WorkerAgent** | `_checked` dict в RAM, нет DEFERRED | Inbox с TTL, DEFERRED, чеклист в SharedContext |
+| **LogistAgent** | FSM в bot.py, passthrough из оркестратора | Агент с ACCEPTED, знает контекст из SharedContext |
+| **Отказ Integram** | Падает всё везде | CrmAgent: DEFERRED + retry очередь |
+| **bot.py** | 1899 строк — монолит | Лёгкий TelegramAdapter (фасад) |
+| **Читаемость потока** | Трасси́ровать по 5 файлам | Gift log = полная история события |
+| **Агент знает зачем** | Нет (только intent) | Да (telos в каждом подарке) |
+| **Свобода агента** | Нет (синхронный вызов) | ACCEPTED / DEFERRED (A5 Gift Ontology) |
+
+---
+
+### 10.7 Эволюционный план: три шага без переписывания
+
+```mermaid
+gantt
+    title Переход к Gift Protocol (эволюция, не переписывание)
+    dateFormat YYYY-MM-DD
+    section Шаг 1 — SharedContext
+    SharedContext (100 строк)        :s1, 2026-04-01, 3d
+    Заменить _dialog_states + histories :s1b, after s1, 2d
+    section Шаг 2 — CrmAgent
+    Класс CrmAgent-обёртка            :s2, after s1b, 3d
+    Перенаправить 10 мест вызова      :s2b, after s2, 3d
+    section Шаг 3 — GiftBroker
+    Gift TypedDict (5 полей)          :s3, after s2b, 2d
+    GiftBroker вместо Orchestrator    :s3b, after s3, 5d
+    WorkerAgent inbox + DEFERRED      :s3c, after s3, 3d
+```
+
+**Шаг 1 — SharedContext** (малый риск, ~100 строк)
+Один `dict` + TTL на user_id. Заменяет `_dialog_states` + `_histories` + разрозненные SQLite-факты. Остальной код не меняется.
+
+**Шаг 2 — CrmAgent** (средний риск, ~150 строк)
+Класс-обёртка над существующим `IntegramClient`. Все 10 мест прямого вызова переводятся на один класс. Логика не меняется — меняется маршрут вызова.
+
+**Шаг 3 — GiftBroker** (высокий выхлоп, ~200 строк)
+`Gift` как `TypedDict` с пятью полями. `GiftBroker` заменяет `Orchestrator._build_graph()`. LangGraph остаётся внутри — просто получает обогащённый контекст из SharedContext.
 
 ---
 

@@ -100,6 +100,17 @@ src/routers/
 - [ ] `_build_order_items()`: сначала по `good["sku"]`, fallback — по имени
 - [ ] Синхронизировать `sku_uds` в Integram для всех 76 товаров
 
+### ✅ Синхронизация после Фазы 8
+
+```bash
+# hive
+git fetch upstream main && git reset --hard upstream/main
+# VPS — сброс + пересборка (Python-код изменился)
+ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT \
+  && git fetch origin main && git reset --hard origin/main \
+  && docker compose up -d --build --force-recreate beebot"
+```
+
 ---
 
 ## Фаза 9: Gift Protocol (P1 — новая архитектура)
@@ -194,6 +205,19 @@ class GiftBroker:
 - [ ] BeebotAgent читает system_prompt из AGENT_SPECS (не из кода)
 - [ ] Команда `/agent_config <agent> <field> <value>` для пчеловода
 
+### ✅ Синхронизация после Фазы 9
+
+```bash
+# hive
+git fetch upstream main && git reset --hard upstream/main
+# VPS — сброс + пересборка (новые модули src/)
+ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT \
+  && git fetch origin main && git reset --hard origin/main \
+  && docker compose up -d --build --force-recreate beebot"
+# Проверить что бот поднялся и Gift Broker активен
+ssh ai-agent@185.233.200.13 "docker logs --tail 20 beebot"
+```
+
 ---
 
 ## Фаза 10: Память и персонализация (P2)
@@ -226,6 +250,20 @@ class GiftBroker:
 - [ ] Фильтровать ответы Александра из комментариев к видео
 - [ ] Добавить в FAISS как отдельный источник (высокий вес — прямая речь)
 
+### ✅ Синхронизация после Фазы 10
+
+```bash
+# hive
+git fetch upstream main && git reset --hard upstream/main
+# VPS — сброс + пересборка + пересборка KB
+ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT \
+  && git fetch origin main && git reset --hard origin/main \
+  && docker compose up -d --build --force-recreate beebot \
+  && docker exec beebot python -m src.build_kb"
+# Проверить количество чанков в логах
+ssh ai-agent@185.233.200.13 "docker logs --tail 10 beebot | grep -i chunk"
+```
+
 ---
 
 ## Фаза 11: Интерфейсы и экосистема (P2)
@@ -251,6 +289,19 @@ class GiftBroker:
 - [ ] Экспорт PDF: выручка за период, топ товаров, ABC-анализ клиентов
 - [ ] Прогноз спроса на следующий месяц через LLM + статистика
 - [ ] Алерт при низком остатке (<5 шт.) → уведомление пчеловоду
+
+### ✅ Синхронизация после Фазы 11
+
+```bash
+# hive
+git fetch upstream main && git reset --hard upstream/main
+# VPS — сброс + пересборка обоих контейнеров (AgentBus меняет web тоже)
+ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT \
+  && git fetch origin main && git reset --hard origin/main \
+  && docker compose up -d --build"
+# Проверить регистрацию в AgentBus
+curl -s http://185.233.200.13:8088/health | python3 -m json.tool
+```
 
 ---
 
@@ -291,6 +342,21 @@ class GiftBroker:
 - [ ] YooKassa или СБП — онлайн-оплата в Telegram
 - [ ] Авто-смена статуса после подтверждения оплаты
 - [ ] Webhook для уведомлений платёжного шлюза
+
+### ✅ Синхронизация после Фазы 12
+
+```bash
+# hive
+git fetch upstream main && git reset --hard upstream/main
+# VPS — полная пересборка + nginx если 12.4 выполнена
+ssh ai-agent@185.233.200.13 "cd /home/ai-agent/BEEBOT \
+  && git fetch origin main && git reset --hard origin/main \
+  && docker compose up -d --build"
+# Проверить SSL если 12.4 выполнена
+curl -I https://beebot.dmitrovykh.ru/health 2>/dev/null | head -5
+# Проверить бэкапы если 12.2 выполнена
+ssh ai-agent@185.233.200.13 "ls -lh /home/ai-agent/BEEBOT/backups/"
+```
 
 ---
 

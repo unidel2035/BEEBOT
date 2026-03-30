@@ -25,7 +25,9 @@ from src.web.deps import (
     _paginate,
     _require_role,
     get_items_cache,
+    get_orders_cache,
     invalidate_items_cache,
+    invalidate_orders_cache,
     push_event,
 )
 from src.web.notifications import (
@@ -52,8 +54,12 @@ async def list_orders(
     try:
         crm = await _get_crm()
         try:
-            orders = await crm.get_orders(client_id=client_id, status=status)
-            result = [_order_to_dict(o) for o in orders]
+            all_orders = await get_orders_cache(crm)
+            result = [_order_to_dict(o) for o in all_orders]
+            if status:
+                result = [o for o in result if o.get("status") == status]
+            if client_id:
+                result = [o for o in result if o.get("client_id") == client_id]
             if source:
                 result = [o for o in result if o.get("source") == source]
             return _paginate(result, page, per_page, search,
@@ -86,6 +92,7 @@ async def create_order_web(
                 delivery_cost=body.delivery_cost or 0,
                 source=body.source or "Сайт",
             )
+            invalidate_orders_cache()
             return _order_to_dict(order)
         finally:
             await crm.close()
@@ -185,6 +192,7 @@ async def update_order_status(
                 "order_number": order.number if order else str(order_id),
                 "status": body.status,
             })
+            invalidate_orders_cache()
             return {"ok": True, "order_id": order_id, "status": body.status, "notified": notified}
         finally:
             await crm.close()

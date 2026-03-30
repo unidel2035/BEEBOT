@@ -14,6 +14,7 @@ from src.agents.admin_chat import AdminChatAgent
 from src.agents.logist import LogistAgent
 from src.agents.beebot import is_products_query
 from src.llm_client import VOICE_STYLES, DEFAULT_VOICE
+from src.gift_protocol import GiftBroker
 from src.routers._state import _user_styles, _admin_mode_users, _admin_view_mode
 import src.routers._state as _state_mod
 from src.routers.keyboards import (
@@ -31,17 +32,20 @@ router = Router()
 _orchestrator: Optional[Orchestrator] = None
 _admin_chat_agent: Optional[AdminChatAgent] = None
 _logist: Optional[LogistAgent] = None
+_gift_broker: Optional[GiftBroker] = None
 
 
 def setup_user(
     orchestrator: Orchestrator,
     admin_chat_agent: AdminChatAgent,
     logist: LogistAgent,
+    gift_broker: Optional[GiftBroker] = None,
 ) -> None:
-    global _orchestrator, _admin_chat_agent, _logist
+    global _orchestrator, _admin_chat_agent, _logist, _gift_broker
     _orchestrator = orchestrator
     _admin_chat_agent = admin_chat_agent
     _logist = logist
+    _gift_broker = gift_broker
 
 
 def _is_admin(user_id: int) -> bool:
@@ -232,10 +236,18 @@ async def handle_question(message: types.Message, state: FSMContext, bot: Bot):
     style = _user_styles.get(message.from_user.id)
     user_name = message.from_user.first_name or None
     try:
-        response, chunks = await _orchestrator.route(
-            message.from_user.id, query, style=style, user_name=user_name
-        )
-        intent = _orchestrator.get_intent(message.from_user.id)
+        # GiftBroker (Фаза 9.3): обогащает запрос контекстом + анамнезом
+        # Fallback на прямой вызов оркестратора если GiftBroker не инжектирован
+        if _gift_broker:
+            response, chunks = await _gift_broker.send(
+                message.from_user.id, query, style=style, user_name=user_name,
+            )
+            intent = _gift_broker.get_intent(message.from_user.id)
+        else:
+            response, chunks = await _orchestrator.route(
+                message.from_user.id, query, style=style, user_name=user_name,
+            )
+            intent = _orchestrator.get_intent(message.from_user.id)
         logger.info("Intent: %s, chunks: %d", intent, len(chunks))
 
         if intent == "order":

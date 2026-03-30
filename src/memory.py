@@ -35,9 +35,18 @@ _HEALTH_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'уже (пробовал|принимала?|использовал[аи]?) (прополис|пергу|гомогенат|подмор|пжвм)', re.I), "interest"),
 ]
 
+# Паттерны отрицания — если совпадают в том же предложении, факт НЕ сохраняется.
+# Решает проблему «у меня нет язвы» → не должно сохраняться как health-факт «язва».
+_NEGATION_RE = re.compile(
+    r'\b(нет|не|без|никогда|не было|не страдаю|не болею|не принимал[аи]?|не пробовал[аи]?|не использовал[аи]?)\b',
+    re.I,
+)
+
 
 def extract_fact(text: str) -> tuple[str, str] | None:
     """Извлечь факт о пользователе из его сообщения.
+
+    Пропускает предложения с отрицаниями — «у меня нет язвы» не сохраняется.
 
     Returns:
         (fact_text, category) или None если ничего не обнаружено.
@@ -48,8 +57,12 @@ def extract_fact(text: str) -> tuple[str, str] | None:
         # Взять предложение с совпадением
         for sentence in re.split(r"[.!?\n]", text):
             s = sentence.strip()
-            if pattern.search(s) and 8 <= len(s) <= 200:
-                return s, category
+            if not pattern.search(s) or not (8 <= len(s) <= 200):
+                continue
+            # Пропустить предложения с отрицаниями
+            if _NEGATION_RE.search(s):
+                continue
+            return s, category
     return None
 
 

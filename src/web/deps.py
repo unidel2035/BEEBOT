@@ -242,6 +242,38 @@ async def _get_crm() -> IntegramClient:
 
 
 # ---------------------------------------------------------------------------
+# Кеш заказов (orders list)
+# ---------------------------------------------------------------------------
+
+_ORDERS_CACHE_TTL = 90  # 1.5 минуты
+_orders_cache: Optional[list] = None
+_orders_cache_ts: float = 0.0
+_orders_cache_lock: asyncio.Lock = asyncio.Lock()
+
+
+async def get_orders_cache(crm: "IntegramClient") -> list:
+    """Вернуть кеш всех заказов, при необходимости обновить (TTL 90 сек)."""
+    global _orders_cache, _orders_cache_ts
+    now = time.monotonic()
+    if _orders_cache is None or (now - _orders_cache_ts) > _ORDERS_CACHE_TTL:
+        async with _orders_cache_lock:
+            if _orders_cache is None or (time.monotonic() - _orders_cache_ts) > _ORDERS_CACHE_TTL:
+                import logging
+                _log = logging.getLogger(__name__)
+                _log.info("Загрузка кеша заказов (TTL истёк)...")
+                _orders_cache = await crm.get_orders()
+                _orders_cache_ts = time.monotonic()
+                _log.info("Кеш заказов: %d заказов", len(_orders_cache))
+    return _orders_cache  # type: ignore[return-value]
+
+
+def invalidate_orders_cache() -> None:
+    """Сбросить кеш заказов (вызывать после создания/обновления заказа)."""
+    global _orders_cache_ts
+    _orders_cache_ts = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Кеш позиций заказов (items_by_order)
 # ---------------------------------------------------------------------------
 

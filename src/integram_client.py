@@ -520,16 +520,17 @@ class IntegramClient:
         self, order_id: int, product_id: int, qty: int, price: float,
     ) -> int:
         """Добавить позицию к заказу. Возвращает ID новой позиции."""
-        item_reqs = {
-            REQ_ITEM_ORDER: str(order_id),
-            REQ_ITEM_PRODUCT: str(product_id),
-            REQ_ITEM_QTY: str(qty),
-            REQ_ITEM_PRICE: str(price),
-            REQ_ITEM_SUM: str(qty * price),
-        }
-        item_id = await self._api.create_object(
-            TABLE_ORDER_ITEMS, f"Позиция заказа", item_reqs,
-        )
+        # _m_new не сохраняет reference-поля и числовые реквизиты.
+        # Правильный порядок: создать объект → set_requisites → set_reference_field ×2
+        item_id = await self._api.create_object(TABLE_ORDER_ITEMS, "Позиция заказа")
+        await self._api.set_requisites(item_id, TABLE_ORDER_ITEMS, {
+            REQ_ITEM_QTY:   str(qty),
+            REQ_ITEM_PRICE: str(int(price)),
+            REQ_ITEM_SUM:   str(int(qty * price)),
+        })
+        await self._api.set_reference_field(item_id, REQ_ITEM_ORDER, str(order_id))
+        if product_id:
+            await self._api.set_reference_field(item_id, REQ_ITEM_PRODUCT, str(product_id))
         logger.info(
             "Добавлена позиция: order=%d, product=%d, qty=%d, sum=%.0f",
             order_id, product_id, qty, qty * price,

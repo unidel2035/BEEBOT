@@ -20,6 +20,9 @@ from src.agents.inspector import InspectorAgent
 from src.agents.admin_chat import AdminChatAgent
 from src.orchestrator import Orchestrator
 from src.agents.analyst import AnalystAgent
+from src.crm_agent import CrmAgent
+from src.anamnesis import AnamnesisCache
+from src.gift_protocol import GiftBroker
 from src.admin import router as admin_router, setup_admin
 from src.logging_config import setup_logging
 
@@ -131,11 +134,23 @@ async def main():
     admin_chat_agent.set_crm(integram_client)
     setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory)
 
+    # --- Gift Protocol: CrmAgent + AnamnesisCache + GiftBroker (Фаза 9) ---
+    crm_agent = CrmAgent(integram_client)   # None если integram_client=None — ОК
+    orchestrator.set_crm_agent(crm_agent)
+    anamnesis_cache = AnamnesisCache(orchestrator._memory)
+    gift_broker = GiftBroker(
+        orchestrator=orchestrator,
+        context_store=orchestrator._shared_ctx,
+        anamnesis=anamnesis_cache,
+        crm_agent=crm_agent,
+    )
+    logger.info("Gift Protocol инициализирован (CrmAgent.available=%s)", crm_agent.available)
+
     # --- Инициализация роутеров ---
     setup_inspect(inspector)
     setup_fsm_order(logist, bot)
     setup_bot_admin(analyst, orchestrator, admin_chat_agent, inspector, bot)
-    setup_user(orchestrator, admin_chat_agent, logist)
+    setup_user(orchestrator, admin_chat_agent, logist, gift_broker=gift_broker)
 
     # --- Режим работника склада ---
     if integram_client:

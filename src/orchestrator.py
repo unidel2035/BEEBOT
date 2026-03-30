@@ -28,6 +28,8 @@ from src.agents.logist import LogistAgent
 from src.agents.analyst import AnalystAgent
 from src.memory import UserMemory, extract_fact
 from src.ontology import OntologyCache
+from src.shared_context import SharedContextStore
+from src.anamnesis import AnamnesisCache
 
 logger = logging.getLogger(__name__)
 
@@ -198,10 +200,17 @@ class Orchestrator:
         # Онтология: Симптомы → Показания к применению (из Integram)
         self._ontology = OntologyCache()
 
-        # In-memory dialog state per user_id
+        # SharedContext — рабочая память пользователей (Фаза 9.1)
+        self._shared_ctx = SharedContextStore()
+
+        # AnamnesisCache — эпизодическая память (Фаза 10.1)
+        self._anamnesis = AnamnesisCache(self._memory)
+
+        # CrmAgent — инжектируется из bot.py после создания IntegramClient (Фаза 9.2)
+        self._crm_agent = None  # Optional[CrmAgent]
+
+        # In-memory dialog state per user_id (сохраняется для совместимости с тестами)
         self._dialog_states: dict[int, DialogState] = {}
-        # Conversation history per user_id (last N messages)
-        self._histories: dict[int, list[_ConversationMessage]] = {}
 
         # FAQ: счётчик пользовательских consult-запросов
         self._query_counter: Counter = Counter()
@@ -213,6 +222,10 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def set_crm_agent(self, crm_agent) -> None:
+        """Инжектировать CrmAgent после создания IntegramClient (вызывается из bot.py)."""
+        self._crm_agent = crm_agent
 
     def load_kb(self):
         """Загрузить базу знаний BEEBOT (вызывается при старте бота)."""
@@ -236,8 +249,8 @@ class Orchestrator:
         """
         self._evict_stale_states()
 
-        # Передать историю диалога для контекста
-        history = list(self._histories.get(user_id, []))
+        # Передать историю диалога из SharedContext
+        history = self._shared_ctx.get(user_id).get_history()
 
         initial_state: OrchestratorState = {
             "user_id": user_id,
@@ -262,9 +275,9 @@ class Orchestrator:
             updated_at=time.monotonic(),
         )
 
-        # Сохранить в историю + FAQ-счётчик (только для consult)
+        # Сохранить в SharedContext историю + FAQ-счётчик (только для consult)
         if result["intent"] == "consult" and result["response"]:
-            self._append_history(user_id, query, result["response"])
+            self._shared_ctx.get(user_id).append_history(query, result["response"])
             self._track_query(query)
 
         return result["response"], result["chunks"]
@@ -349,6 +362,12 @@ class Orchestrator:
         if onto_hint:
             memory_facts.insert(0, onto_hint)
 
+        # Персонализация «Вы уже брали» (Фаза 10.1/10.3) — через AnamnesisCache
+        anamnesis = await self._anamnesis.get(user_id, self._crm_agent)
+        anamnesis_hint = self._anamnesis.format_for_llm(anamnesis)
+        if anamnesis_hint:
+            memory_facts.append(anamnesis_hint)
+
         advice_text = self._ontology.get_advice_prompt() or None
 
         response, chunks = self._beebot.answer(
@@ -361,18 +380,23 @@ class Orchestrator:
         )
 
         # Авто-сохранить факт если пользователь упомянул здоровье/интерес
+        # (отрицания автоматически отфильтровываются в extract_fact — Фаза 10.2)
         fact_result = extract_fact(query)
         if fact_result:
             fact_text, category = fact_result
             added = self._memory.add_fact(user_id, fact_text, category=category, source="auto")
-            # Дублировать health-факт в Integram «Профиль здоровья»
-            if added and category == "health" and user_id > 0:
-                try:
-                    from src.integram_client import IntegramClient
-                    async with IntegramClient() as crm:
-                        await crm.add_health_profile(user_id, fact_text)
-                except Exception as _e:
-                    logger.debug("Профиль здоровья: не удалось записать в Integram: %s", _e)
+            # Дублировать health-факт в CrmAgent → Integram (Фаза 9.2)
+            if added and category == "health":
+                if self._crm_agent:
+                    await self._crm_agent.add_health_fact(user_id, fact_text)
+                else:
+                    # Fallback: прямой вызов если CrmAgent не инжектирован
+                    try:
+                        from src.integram_client import IntegramClient
+                        async with IntegramClient() as crm:
+                            await crm.add_health_profile(user_id, fact_text)
+                    except Exception as _e:
+                        logger.debug("Профиль здоровья: не удалось записать в Integram: %s", _e)
 
         return {**state, "response": response, "chunks": chunks}
 
@@ -422,24 +446,13 @@ class Orchestrator:
     def _is_fresh(self, state: DialogState) -> bool:
         return (time.monotonic() - state["updated_at"]) < _DIALOG_TTL_SECONDS
 
-    def _append_history(self, user_id: int, query: str, response: str) -> None:
-        """Добавить пару вопрос-ответ в историю, ограничить до _MAX_HISTORY пар."""
-        if user_id not in self._histories:
-            self._histories[user_id] = []
-        hist = self._histories[user_id]
-        hist.append({"role": "user", "content": query})
-        hist.append({"role": "assistant", "content": response})
-        # Оставить только последние _MAX_HISTORY пар (×2 сообщения)
-        max_messages = _MAX_HISTORY * 2
-        if len(hist) > max_messages:
-            self._histories[user_id] = hist[-max_messages:]
-
     def _evict_stale_states(self):
         """Удалить устаревшие состояния диалога (TTL 30 мин)."""
         stale = [uid for uid, s in self._dialog_states.items() if not self._is_fresh(s)]
         for uid in stale:
             del self._dialog_states[uid]
-            self._histories.pop(uid, None)
+        # Вытеснить просроченные SharedContext
+        self._shared_ctx.evict_stale()
 
     # ------------------------------------------------------------------
     # FAQ: сбор частых запросов

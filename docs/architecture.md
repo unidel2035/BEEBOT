@@ -1,143 +1,128 @@
 # BEEBOT — Архитектурные диаграммы
 
-> **Версия:** 31 марта 2026 · Добавлен раздел 11: Новые компоненты фаз 9–12
+> **Версия:** 1 апреля 2026 · Раздел 1 разбит на 3 диаграммы для читаемости
 
 ---
 
 ## 1. Общая архитектура системы
 
+### 1.1 Верхнеуровневый обзор
+
 ```mermaid
 graph TB
-    subgraph Пользователи
-        TG_USER[📱 Подписчики<br/>Telegram]
-        WORKER[🏭 Работник склада<br/>Telegram]
-        ADMIN[🐝 Пчеловод<br/>Telegram + Веб]
-        DEV[👨‍💻 Разработчик<br/>DEVBOT + Claude Code]
+    subgraph Users["Пользователи"]
+        TG_USER[📱 Подписчики]
+        WORKER[🏭 Работник склада]
+        ADMIN[🐝 Пчеловод]
+        DEV[👨‍💻 Разработчик]
     end
 
-    subgraph VPS["VPS 185.233.200.13 (Docker)"]
-        BOT[🤖 Telegram-бот<br/>aiogram 3 · Router-модули]
-        WEB_API[🌐 FastAPI<br/>REST API + JWT + SSE]
-        WEB_FRONT[💻 Vue 3 PWA<br/>порт 8088]
-        TRACKER[⏱ Авто-трекинг<br/>каждые 2 часа]
-        UDS_POLL[🔄 UDS Poller<br/>каждые 5 минут]
-        CRM_SNAP[📷 CrmSnapshot<br/>кэш 5 мин + low-stock алерт]
-        TUNNEL_MON[🔌 TunnelMonitor<br/>порт 8990 · 60 сек]
-        BACKUP_MGR[💾 BackupManager<br/>daily + weekly · Яндекс Диск]
+    VPS_BLOCK[🖥 VPS Docker<br/>Бот · Агенты · Веб-панель<br/>Фоновые процессы]
+    HIVE_BLOCK[🏠 Hive<br/>groq-proxy · SOCKS5 · DEVBOT]
+    EXT_BLOCK[🌐 Внешние API<br/>Groq · Integram CRM · СДЭК<br/>Почта · UDS · Telegram]
+    KB_BLOCK[📚 База знаний<br/>FAISS 276 чанков · SQLite<br/>Онтология]
+    BACKUP_BLOCK[💾 Яндекс Диск<br/>daily + weekly]
+
+    TG_USER & WORKER & ADMIN -->|Telegram| VPS_BLOCK
+    ADMIN -->|веб :8088| VPS_BLOCK
+    DEV -->|/dev| VPS_BLOCK
+
+    VPS_BLOCK <-->|SSH-туннели| HIVE_BLOCK
+    VPS_BLOCK <-->|HTTP/REST| EXT_BLOCK
+    VPS_BLOCK --- KB_BLOCK
+    VPS_BLOCK -->|бэкап| BACKUP_BLOCK
+    HIVE_BLOCK -->|Groq · TG API| EXT_BLOCK
+```
+
+### 1.2 VPS: бот, агенты и фоновые процессы
+
+```mermaid
+graph TB
+    subgraph Bot["Telegram-бот (aiogram 3)"]
+        BOT[🤖 bot.py<br/>Router-модули]
     end
 
-    subgraph Агенты["Агенты (src/agents/)"]
-        ORCH[🧠 Оркестратор<br/>LangGraph StateGraph]
-        CONSUL[🐝 Консультант<br/>FAISS → LLM + FAQ fallback]
+    subgraph Agents["Агенты (LangGraph)"]
+        ORCH[🧠 Оркестратор]
+        CONSUL[🐝 Консультант<br/>FAISS → LLM]
         LOGIST[📦 Логист<br/>FSM 7 шагов]
-        ANALYST[📊 Аналитик<br/>CRM → отчёты]
-        INSPECT[🔍 Инспектор<br/>Осмотр улья]
-        ADMINCHAT[🤖 Ассистент<br/>LLM + CrmSnapshot]
-        WORKER_AG[🏭 WorkerAgent<br/>очередь + inbox + DEFERRED]
+        ANALYST[📊 Аналитик]
+        INSPECT[🔍 Инспектор]
+        ADMINCHAT[🤖 Ассистент<br/>CrmSnapshot]
+        WORKER_AG[🏭 WorkerAgent]
     end
 
-    subgraph GiftLayer["Gift Protocol"]
-        GIFT_BROKER[GiftBroker<br/>suggest_interface]
-        SHARED_CTX[(SharedContext<br/>per-user · TTL 30мин)]
-        ANAMNESIS_C[AnamnesisCache<br/>SQLite + CRM история]
-        CRM_AGENT[CrmAgent<br/>единый владелец CRM]
-        AGENT_BUS[AgentBus Client<br/>dronedoc2026 · опц.]
+    subgraph Gift["Gift Protocol"]
+        BROKER[GiftBroker]
+        SC[(SharedContext)]
+        ANAM[AnamnesisCache]
+        CRMA[CrmAgent]
     end
 
-    subgraph KB["База знаний"]
-        FAISS[(FAISS<br/>276 чанков + comment:×1.2)]
-        DOCS[📄 PDF / TXT<br/>26 YouTube + Q&A комментарии]
-        MEMORY[(SQLite<br/>Факты пользователей)]
-        ONTOLOGY[(Integram<br/>74 симптома + 77 показаний)]
+    subgraph Web["Веб-панель :8088"]
+        FRONT[💻 Vue 3 PWA]
+        API[🌐 FastAPI<br/>JWT + SSE]
     end
 
-    subgraph External["Внешние сервисы"]
-        GROQ[⚡ Groq API<br/>llama-3.3-70b]
-        CRM[(Integram CRM<br/>ai2o.ru/bibot)]
-        CDEK[🚚 СДЭК API v2]
-        POCHTA[📮 Почта России]
-        UDS_API[💳 UDS API<br/>система лояльности]
-        TG_API[💬 Telegram API]
+    subgraph Background["Фоновые процессы"]
+        TRACKER[⏱ Авто-трекинг 2ч]
+        UDS_POLL[🔄 UDS Poller 5мин]
+        CRM_SNAP[📷 CrmSnapshot 5мин]
+        TUNNEL_MON[🔌 TunnelMonitor 60с]
+        BACKUP_MGR[💾 BackupManager]
     end
 
-    subgraph HIVE["Hive (локальная машина)"]
-        PROXY[groq-proxy<br/>порт 8990]
-        TG_SOCKS[SOCKS5-прокси<br/>порт 9150]
-        DEVBOT[🤖 DEVBOT<br/>порт 8091 · Bearer auth]
-        CLAUDE[⚡ Claude Code CLI<br/>executor]
-    end
-
-    subgraph Backup["Резервные копии"]
-        YADISK[(Яндекс Диск<br/>/BEEBOT/daily/ · weekly/)]
-    end
-
-    TG_USER -->|сообщения| TG_API
-    WORKER -->|/start очередь| TG_API
-    ADMIN -->|/admin /stats| TG_API
-    ADMIN -->|веб-панель :8088| WEB_FRONT
-    DEV -->|/dev задача| TG_API
-
-    TG_API -->|polling SOCKS5| BOT
     BOT --> ORCH
-    BOT --> INSPECT
-    BOT --> WORKER_AG
-    BOT --> ADMINCHAT
-    ADMINCHAT --> CRM_SNAP
-
+    BOT --> INSPECT & WORKER_AG & ADMINCHAT
     ORCH -->|consult| CONSUL
     ORCH -->|order| LOGIST
     ORCH -->|stats| ANALYST
-    ORCH -->|greeting| BOT
 
-    CONSUL --> FAISS
-    CONSUL --> GROQ
+    BOT --> BROKER
+    BROKER <--> SC
+    BROKER --> ANAM --> CRMA
 
-    LOGIST --> CRM
-    LOGIST --> CDEK
-    LOGIST --> POCHTA
-
-    ANALYST --> CRM
-
-    WORKER_AG --> CRM
-
-    CRM_SNAP --> CRM
-
-    FAISS --> DOCS
-    BOT --> MEMORY
-    BOT --> ONTOLOGY
-
-    WEB_FRONT -->|REST/JWT| WEB_API
-    WEB_API --> CRM
-    WEB_API -->|SSE| WEB_FRONT
-
-    TRACKER --> CRM
-    TRACKER --> CDEK
-    TRACKER --> POCHTA
-    UDS_POLL --> UDS_API
-    UDS_POLL --> CRM
-
-    BOT --> GIFT_BROKER
-    GIFT_BROKER <--> SHARED_CTX
-    GIFT_BROKER --> ANAMNESIS_C
-    ANAMNESIS_C --> CRM_AGENT
-    CRM_AGENT --> CRM
-
-    BOT -->|DEVBOT_API_URL Bearer| DEVBOT
-    DEVBOT --> CLAUDE
-    CLAUDE -->|git + deploy| VPS
-
-    BOT --> TUNNEL_MON
+    ADMINCHAT --> CRM_SNAP
     TUNNEL_MON -->|is_healthy| CONSUL
 
-    BACKUP_MGR -->|memory.db + CRM CSV| YADISK
-    BACKUP_MGR --> MEMORY
+    FRONT -->|REST/JWT| API
+    API -->|SSE| FRONT
+```
 
-    BOT --> AGENT_BUS
+### 1.3 Hive и внешние сервисы
 
-    BOT -->|SOCKS5| TG_SOCKS
-    GROQ -->|groq-proxy:8990| PROXY
-    TG_SOCKS -->|SSH -R 9150| VPS
-    PROXY -->|SSH -L 8990| VPS
+```mermaid
+graph LR
+    subgraph VPS["VPS 185.233.200.13"]
+        BOT[beebot container]
+        WEB[beebot-web :8088]
+    end
+
+    subgraph HIVE["Hive (локальная машина)"]
+        PROXY[groq-proxy :8990]
+        TG_SOCKS[SOCKS5 :9150]
+        DEVBOT[🤖 DEVBOT :8091]
+        CLAUDE[Claude Code CLI]
+    end
+
+    subgraph External["Внешние API"]
+        GROQ[Groq API]
+        TG_API[Telegram API]
+        CRM[(Integram CRM)]
+        CDEK[СДЭК v2]
+        POCHTA[Почта России]
+        UDS[UDS API]
+        YADISK[(Яндекс Диск)]
+    end
+
+    BOT -->|SSH -L 8990| PROXY -->|HTTPS| GROQ
+    BOT -->|SSH -R 9150| TG_SOCKS -->|HTTPS| TG_API
+    BOT -->|SSH tunnel :8091| DEVBOT --> CLAUDE
+
+    BOT & WEB -->|REST| CRM
+    BOT -->|трекинг| CDEK & POCHTA
+    BOT -->|поллинг| UDS
+    BOT -->|бэкап| YADISK
 ```
 
 ---

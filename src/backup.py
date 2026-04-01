@@ -27,9 +27,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Папка на Яндекс Диске
-_YD_ROOT = "/BEEBOT"
-_YD_DAILY = f"{_YD_ROOT}/daily"
-_YD_WEEKLY = f"{_YD_ROOT}/weekly"
+# Префикс "app:/" — работает с правами cloud_api:disk.app_folder
+# Файлы будут в: Яндекс Диск → Приложения → BEEBOT Backup → daily/weekly
+_YD_ROOT = "app:/"
+_YD_DAILY = f"{_YD_ROOT}daily"
+_YD_WEEKLY = f"{_YD_ROOT}weekly"
 
 # Сколько ежедневных бэкапов хранить
 _KEEP_DAILY = 30
@@ -115,7 +117,7 @@ class BackupManager:
     async def _ensure_dirs(self) -> None:
         """Создать папки на Яндекс Диске если не существуют."""
         assert self._yd is not None
-        for folder in (_YD_ROOT, _YD_DAILY, _YD_WEEKLY):
+        for folder in (_YD_DAILY, _YD_WEEKLY):
             try:
                 if not await self._yd.exists(folder):
                     await self._yd.mkdir(folder)

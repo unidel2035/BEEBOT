@@ -8,17 +8,15 @@
 
 ```mermaid
 graph TB
-    subgraph USERS["Пользователи"]
-        U1["Подписчики<br/>(Telegram)"]
-        U2["Пчеловод<br/>(Admin)"]
-        U3["Работники<br/>(Worker)"]
-        U4["Веб-панель<br/>(Браузер)"]
+    subgraph CLIENTS["Клиенты (вне сервера)"]
+        TG_USERS["Подписчики / Пчеловод / Работники<br/>(Telegram)"]
+        BROWSER["Браузер<br/>(Vue 3 PWA)"]
     end
 
     subgraph BEEBOT["beebot (один контейнер, один процесс)"]
-        subgraph TRANSPORT["Транспортный слой"]
+        subgraph TRANSPORT["Транспортный слой (серверный)"]
             POLLING["aiogram polling<br/>5 роутеров"]
-            UVICORN["uvicorn :8088<br/>FastAPI + Vue PWA"]
+            FASTAPI["FastAPI :8088<br/>9 веб-роутеров<br/>+ раздача Vue dist/"]
         end
 
         subgraph AGENTS["Агенты (тонкие обёртки)"]
@@ -53,7 +51,7 @@ graph TB
         STARTUP["startup.py<br/>create_services()"]
     end
 
-    subgraph INFRA["Инфраструктура"]
+    subgraph INFRA["Хранилища"]
         CRM[("CRM<br/>ai2o.online")]
         REDIS[("Redis :6379")]
         KB["FAISS<br/>276 чанков"]
@@ -61,24 +59,24 @@ graph TB
         MEM["SQLite"]
     end
 
-    subgraph EXTERNAL["Внешние системы"]
+    subgraph EXTERNAL["Внешние API"]
         UDS_API["UDS App"]
         CDEK_A["СДЭК API"]
         POCHTA_A["Почта России"]
     end
 
-    U1 & U2 & U3 --> POLLING
-    U4 --> UVICORN
+    TG_USERS -->|"Telegram API"| POLLING
+    BROWSER -->|"HTTP /api/*"| FASTAPI
+    FASTAPI -->|"раздаёт index.html + assets"| BROWSER
 
     STARTUP -->|"создаёт"| AGENTS & SVC_LAYER & CROSS
 
-    POLLING --> ORCH
-    ORCH --> AGENTS
+    POLLING --> ORCH --> AGENTS
     AGENTS -->|"делегируют"| SVC_LAYER
-    UVICORN -->|"FastAPI роутеры"| SVC_LAYER
+    FASTAPI -->|"роутеры"| SVC_LAYER
 
     SVC_LAYER --> CRM & KB & LLM & MEM
-    EVENTS -->|"SSE"| UVICORN
+    EVENTS -->|"SSE"| FASTAPI
     EVENTS --> BUS
     STATE --> REDIS
     BUS --> REDIS
@@ -90,19 +88,20 @@ graph TB
     style AGENTS fill:#fff3e0
     style CROSS fill:#fff8e1,stroke:#f9a825
     style STARTUP fill:#e3f2fd,stroke:#1976d2
+    style CLIENTS fill:#fef3c7
 ```
 
-**Ключевой принцип: Bot → Backend ← Frontend**
+**Ключевой принцип: Bot → Service Layer ← Frontend**
+
+Два клиента — Telegram и браузер (Vue PWA). Оба обращаются к серверу, но через разный транспорт:
 
 ```
-Telegram (polling)  ──→  Service Layer  ←──  FastAPI (uvicorn)
-        │                     │                     │
-    Агенты              Бизнес-логика          Веб-роутеры
-   (обёртки)          (единственный            (тонкие)
-                     источник правды)
+Telegram-клиент  ──polling──→  aiogram роутеры ──→ Агенты ──→ Service Layer
+                                                                    ↑
+Vue PWA (браузер) ──HTTP/SSE──→ FastAPI роутеры ────────────────────┘
 ```
 
-Бот и веб-панель — равноправные клиенты Service Layer. Ни один не знает о другом. Вся логика в сервисах.
+Бот и веб — равноправные клиенты. Вся логика в сервисах. Vue — клиентское приложение в браузере, FastAPI только раздаёт его статику и обрабатывает API-запросы.
 
 ---
 

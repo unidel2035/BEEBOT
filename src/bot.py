@@ -1,35 +1,28 @@
-"""Telegram bot for BEEBOT — AI assistant for a beekeeper blog."""
+"""Telegram bot for BEEBOT — тонкий клиент.
+
+Бот — это транспортный слой. Вся бизнес-логика живёт в Service Layer (src/services/),
+сервисы создаются в src/startup.py (единая точка инициализации).
+
+Best practice: «The bot layer should only do two things:
+(1) Chain of Responsibility for routing, (2) FSM for conversation state.
+All business logic lives elsewhere.» — DEV Community
+"""
 
 import asyncio
 import logging
-from typing import Optional
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from src.config import (
-    TELEGRAM_BOT_TOKEN, BASE_DIR, BEEKEEPER_CHAT_ID, ADMIN_IDS,
-    TG_SOCKS_PROXY, WORKER_CHAT_IDS,
+    TELEGRAM_BOT_TOKEN,
+    BEEKEEPER_CHAT_ID,
+    TG_SOCKS_PROXY,
+    WORKER_CHAT_IDS,
 )
-from src import config as app_config
-from src.delivery.tracker import OrderTracker
-from src.integrations.uds import UDSClient, UDSPoller
-from src.crm_factory import get_crm_client
-from src.services.order_service import OrderService
-from src.services.notification_service import NotificationService
-from src.services.auth_service import AuthService
-from src.agents.logist import LogistAgent
-from src.agents.inspector import InspectorAgent
-from src.agents.admin_chat import AdminChatAgent
-from src.orchestrator import Orchestrator
-from src.agents.analyst import AnalystAgent
-from src.crm_agent import CrmAgent
-from src.anamnesis import AnamnesisCache
-from src.gift_protocol import GiftBroker
-from src.agent_specs import AgentSpecsCache
-from src.backup import BackupManager
 from src.admin import router as admin_router, setup_admin
 from src.logging_config import setup_logging
+from src.startup import Services, create_services, start_background_tasks
 
 # Роутеры из src/routers/
 from src.routers.inspect import router as inspect_router, setup_inspect
@@ -37,7 +30,6 @@ from src.routers.fsm_order import router as fsm_order_router, setup_fsm_order
 from src.routers.worker import router as worker_router, setup_worker
 from src.routers.bot_admin import router as bot_admin_router, setup_bot_admin
 from src.routers.user import router as user_router, setup_user
-import src.routers._state as _state
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +61,54 @@ async def _alert(text: str) -> None:
         logger.warning("Не удалось отправить Telegram-алерт: %s", e)
 
 
+async def _send_tg(chat_id: int, text: str) -> bool:
+    """Обёртка для отправки сообщений через aiogram Bot."""
+    try:
+        await bot.send_message(chat_id, text)
+        return True
+    except Exception:
+        return False
+
+
 @dp.startup()
 async def on_startup(**_kwargs) -> None:
     """Отправить алерт о старте после установки соединения с Telegram."""
     await _alert("🟢 BEEBOT запущен")
 
 
+def setup_routers(svc: Services) -> None:
+    """Подключить сервисы к aiogram-роутерам.
+
+    Роутеры — тонкие обёртки: парсят Telegram-update, вызывают сервис,
+    форматируют ответ. Ноль бизнес-логики.
+    """
+    setup_admin(
+        bot, crm=svc.crm, kb=svc.kb,
+        memory=svc.orchestrator._memory, auth=svc.auth,
+    )
+    setup_inspect(svc.inspector)
+    setup_fsm_order(svc.logist, bot)
+    setup_bot_admin(
+        svc.analyst, svc.orchestrator, svc.admin_chat_agent,
+        svc.inspector, bot, auth=svc.auth,
+    )
+    setup_user(
+        svc.orchestrator, svc.admin_chat_agent, svc.logist,
+        gift_broker=svc.gift_broker, auth=svc.auth,
+    )
+
+    # Режим работника склада
+    if svc.crm:
+        setup_worker(svc.crm, bot, gift_broker=svc.gift_broker, auth=svc.auth)
+        from src.notifications import Notifier
+        import src.notifications as _notif_module
+        _notif_module._worker_notifier = Notifier(bot)
+        if WORKER_CHAT_IDS:
+            logger.info("Режим работника склада включён (%d работников).", len(WORKER_CHAT_IDS))
+
+
 async def main():
+    """Standalone-режим: бот запускается как отдельный процесс (polling)."""
     global bot
     setup_logging()
 
@@ -86,178 +119,14 @@ async def main():
 
     logger.info("Starting BEEBOT...")
 
-    # --- Загрузка базы знаний ---
-    orchestrator = Orchestrator()
-    inspector = InspectorAgent()
-    logist = LogistAgent(beekeeper_chat_id=BEEKEEPER_CHAT_ID)
-    analyst = AnalystAgent(
-        groq_client=orchestrator._groq,
-        groq_model=orchestrator._model,
-    )
-    admin_chat_agent = AdminChatAgent(
-        groq_client=orchestrator._groq,
-        model=orchestrator._model,
-    )
+    # --- Создание всех сервисов через единую точку ---
+    svc = await create_services(alert_fn=_alert, send_telegram=_send_tg)
 
-    try:
-        orchestrator.load_kb()
-        inspector.kb = orchestrator._beebot.kb
-        kb = orchestrator._beebot.kb
-        logger.info("Knowledge base loaded: %d chunks", len(kb.chunks))
-    except FileNotFoundError:
-        logger.error("Knowledge base not found! Run `python -m src.build_kb` first.")
-        return
+    # --- Подключение сервисов к роутерам ---
+    setup_routers(svc)
 
-    # --- Integram CRM (v1 или v2 по feature flag INTEGRAM_V2) ---
-    integram_client = None
-    try:
-        integram_client = get_crm_client()
-        await integram_client.authenticate()
-        logist.set_crm(integram_client)
-        analyst.set_crm(integram_client)
-
-        # --- Service Layer ---
-        async def _send_tg(chat_id: int, text: str) -> bool:
-            try:
-                await bot.send_message(chat_id, text)
-                return True
-            except Exception:
-                return False
-
-        notifier = NotificationService(
-            send_telegram=_send_tg,
-            beekeeper_chat_id=BEEKEEPER_CHAT_ID,
-            worker_ids=WORKER_CHAT_IDS,
-            get_client_tg_id=integram_client.get_client_telegram_id,
-        )
-        order_service = OrderService(crm=integram_client, notifier=notifier)
-        logist.set_order_service(order_service)
-
-        try:
-            products = await integram_client.get_products()
-            names = [p.name for p in products if p.name]
-            added = kb.update_keywords_from_products(names)
-            if added:
-                logger.info("KB keyword-буст: добавлено %d ключей из CRM (%d товаров)", added, len(names))
-        except Exception as _e:
-            logger.warning("Не удалось обновить keyword-буст из CRM: %s", _e)
-        logger.info("Integram CRM подключена — агенты получили доступ к данным.")
-    except Exception as e:
-        logger.warning("Integram CRM недоступна: %s — агенты работают без CRM.", e)
-
-    # --- Онтология ---
-    try:
-        await orchestrator.load_ontology()
-    except Exception as _e:
-        logger.warning("Онтология недоступна (продолжаем без неё): %s", _e)
-
-    admin_chat_agent.set_crm(integram_client)
-
-    # --- AuthService — единая проверка ролей ---
-    auth = AuthService(
-        admin_ids=ADMIN_IDS,
-        worker_ids=WORKER_CHAT_IDS,
-        beekeeper_id=BEEKEEPER_CHAT_ID,
-    )
-
-    setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory, auth=auth)
-
-    # --- Gift Protocol: CrmAgent + AnamnesisCache + GiftBroker (Фаза 9) ---
-    crm_agent = CrmAgent(integram_client)   # None если integram_client=None — ОК
-    orchestrator.set_crm_agent(crm_agent)
-    anamnesis_cache = AnamnesisCache(orchestrator._memory)
-    gift_broker = GiftBroker(
-        orchestrator=orchestrator,
-        context_store=orchestrator._shared_ctx,
-        anamnesis=anamnesis_cache,
-        crm_agent=crm_agent,
-    )
-    logger.info("Gift Protocol инициализирован (CrmAgent.available=%s)", crm_agent.available)
-
-    # --- AgentSpecsCache — спецификации агентов из Integram (Фаза 9.5) ---
-    agent_specs = AgentSpecsCache()
-    try:
-        await agent_specs.load()
-    except Exception as _e:
-        logger.warning("AgentSpecs: недоступны (продолжаем без них): %s", _e)
-    orchestrator.set_agent_specs(agent_specs)
-
-    # --- Инициализация роутеров ---
-    setup_inspect(inspector)
-    setup_fsm_order(logist, bot)
-    setup_bot_admin(analyst, orchestrator, admin_chat_agent, inspector, bot, auth=auth)
-    setup_user(orchestrator, admin_chat_agent, logist, gift_broker=gift_broker, auth=auth)
-
-    # --- Режим работника склада ---
-    if integram_client:
-        setup_worker(integram_client, bot, gift_broker=gift_broker, auth=auth)
-        from src.notifications import Notifier
-        import src.notifications as _notif_module
-        _notif_module._worker_notifier = Notifier(bot)
-        if WORKER_CHAT_IDS:
-            logger.info("Режим работника склада включён (%d работников).", len(WORKER_CHAT_IDS))
-
-    # --- BackgroundTaskManager — управляемые фоновые задачи ---
-    from src.web.bg_tasks import BackgroundTaskManager
-    bg = BackgroundTaskManager(alert_fn=_alert)
-
-    # --- CRM Snapshot ---
-    if integram_client:
-        from src.crm_snapshot import CrmSnapshot
-        _state._crm_snapshot = CrmSnapshot(integram_client, alert_fn=_alert)
-        await bg.start("crm_snapshot", _state._crm_snapshot.run)
-        logger.info("CRM snapshot запущен (интервал %d сек).", _state._crm_snapshot._refresh_interval)
-
-    # --- Авто-трекинг ---
-    order_tracker: Optional[OrderTracker] = None
-    if integram_client:
-        from src.web.notifications import notify_client_status_change
-        order_tracker = OrderTracker(
-            crm=integram_client,
-            notify_fn=notify_client_status_change,
-        )
-        await bg.start("order_tracker", order_tracker.run)
-        logger.info("Авто-трекинг отправлений запущен.")
-
-    # --- UDS Poller ---
-    uds_client: Optional[UDSClient] = None
-
-    if app_config.UDS_API_KEY and app_config.UDS_COMPANY_ID:
-        if integram_client:
-            try:
-                uds_client = UDSClient()
-                uds_poller = UDSPoller(
-                    uds_client=uds_client,
-                    integram_client=integram_client,
-                    bot=bot,
-                    notify_chat_id=BEEKEEPER_CHAT_ID,
-                )
-                await bg.start("uds_poller", uds_poller.run)
-                logger.info("UDS Poller запущен.")
-            except Exception as e:
-                logger.warning("UDS Poller не удалось запустить: %s", e)
-        else:
-            logger.warning("UDS Poller пропущен — Integram CRM не подключена.")
-    else:
-        logger.info("UDS не настроен — поллер пропущен.")
-
-    # --- TunnelMonitor — мониторинг SSH-туннеля к Groq (Фаза 12.1) ---
-    from src.tunnel_monitor import TunnelMonitor
-    _tunnel_monitor = TunnelMonitor(alert_fn=_alert)
-    orchestrator._beebot.tunnel_monitor = _tunnel_monitor
-    await bg.start("tunnel_monitor", _tunnel_monitor.run)
-    logger.info("TunnelMonitor запущен (порт 8990).")
-
-    # --- BackupManager — Яндекс Диск (Фаза 12.2) ---
-    _backup = BackupManager(
-        memory_db_path=app_config.MEMORY_DB_PATH,
-        crm=integram_client,
-    )
-    await bg.start("backup", _backup.run)
-    if _backup.available:
-        logger.info("BackupManager запущен (daily memory.db + weekly CRM CSV).")
-    else:
-        logger.info("BackupManager: YADISK_TOKEN не задан — бэкапы отключены.")
+    # --- Фоновые задачи ---
+    await start_background_tasks(svc, bot=bot, alert_fn=_alert)
 
     logger.info("Bot is running!")
     _crashed = False
@@ -271,11 +140,7 @@ async def main():
     finally:
         if not _crashed:
             await _alert("🔴 BEEBOT остановлен")
-        await bg.stop_all()
-        if uds_client:
-            await uds_client.close()
-        if integram_client:
-            await integram_client.close()
+        await svc.close()
 
 
 if __name__ == "__main__":

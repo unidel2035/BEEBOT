@@ -1,4 +1,11 @@
-"""FastAPI-бэкенд веб-панели управления заказами «Усадьба Дмитровых».
+"""FastAPI-бэкенд — единая точка входа для веб-панели и (в перспективе) бота.
+
+Все сервисы создаются через src/startup.py (единый Service Layer).
+CRM-клиент — singleton на весь процесс (не создаётся заново на каждый запрос).
+
+Best practice: FastAPI Lifespan pattern — singleton сервисы через app.state.
+Anti-pattern avoided: «Creating new DB connections or HTTP clients inside
+each route handler» — singletons created once in lifespan.
 
 Конфигурация через .env:
   WEB_USERNAME      — логин администратора-фоллбэк (по умолчанию: admin)
@@ -35,6 +42,7 @@ from src.web.deps import (
     _event_subscribers,
     _require_role,
     push_event,
+    set_crm_singleton,
 )
 from src.web.routers.auth import router as auth_router
 from src.web.routers.batches import router as batches_router
@@ -75,21 +83,52 @@ async def lifespan(app: FastAPI):
     from src.logging_config import setup_logging
     setup_logging()
 
-    # OrderService для веб-панели (единая точка создания заказов)
-    order_service = None
+    # --- Единый Service Layer через startup.py ---
+    svc = None
     try:
-        from src.crm_factory import get_crm_client
-        from src.services.order_service import OrderService
-        crm = get_crm_client()
-        await crm.authenticate()
-        order_service = OrderService(crm=crm)
-        app.state.order_service = order_service
-        logger.info("OrderService подключён к веб-панели")
-    except Exception as e:
-        app.state.order_service = None
-        logger.warning("OrderService недоступен: %s", e)
+        from src.startup import create_services
+        svc = await create_services(alert_fn=_telegram_alert)
+        app.state.services = svc
 
-    # EventBus — Redis Streams (бот ↔ бэкенд)
+        # Singleton CRM для deps._get_crm() (все 37 роутеров используют его)
+        set_crm_singleton(svc.crm)
+
+        # Singleton-сервисы для веб-роутеров
+        app.state.crm = svc.crm
+        app.state.order_service = svc.order_service
+        app.state.analytics_service = svc.analytics_service
+        app.state.consult_service = svc.consult_service
+        app.state.worker_service = svc.worker_service
+        app.state.delivery_service = svc.delivery_service
+        app.state.auth = svc.auth
+        app.state.dashboard_service = svc.dashboard_service
+        app.state.bg_manager = svc.bg_manager
+        logger.info("Service Layer инициализирован (единая точка)")
+    except Exception as e:
+        app.state.services = None
+        app.state.order_service = None
+        app.state.crm = None
+        logger.warning("Service Layer недоступен: %s", e)
+
+    # --- EventEmitter → SSE bridge + CQRS cache invalidation ---
+    from src.services.event_emitter import events
+    from src.web.deps import invalidate_orders_cache, invalidate_items_cache
+
+    async def _sse_bridge(event_type: str, data: dict):
+        """Пробросить бизнес-события в SSE для веб-панели."""
+        await push_event(event_type, data)
+
+    async def _invalidate_caches(event_type: str, data: dict):
+        """CQRS: запись → инвалидация read model (кэшей)."""
+        if event_type in ("order.created", "order.status_changed"):
+            invalidate_orders_cache()
+            invalidate_items_cache()
+
+    events.on("*", _sse_bridge)
+    events.on("order.created", _invalidate_caches)
+    events.on("order.status_changed", _invalidate_caches)
+
+    # --- EventBus (Redis Streams) ---
     bus = None
     try:
         from src.bus import EventBus
@@ -97,11 +136,17 @@ async def lifespan(app: FastAPI):
         from src.config import REDIS_URL
         bus = EventBus(REDIS_URL)
         await bus.connect()
-        handlers = BusHandlers(bus, order_service=order_service)
+        handlers = BusHandlers(
+            bus,
+            order_service=svc.order_service if svc else None,
+            consult_service=svc.consult_service if svc else None,
+            analytics_service=svc.analytics_service if svc else None,
+        )
         await handlers.start()
         app.state.bus = bus
         app.state.bus_handlers = handlers
-        logger.info("EventBus подключён: %s", REDIS_URL)
+        events.set_redis_bus(bus)
+        logger.info("EventBus подключён")
     except Exception as e:
         app.state.bus = None
         logger.warning("EventBus недоступен (продолжаем без него): %s", e)
@@ -109,9 +154,11 @@ async def lifespan(app: FastAPI):
     await _telegram_alert("🌐 Веб-панель BEEBOT запущена")
     yield
 
-    # Shutdown
+    # --- Shutdown ---
     if bus:
         await bus.close()
+    if svc:
+        await svc.close()
     await _telegram_alert("🌐 Веб-панель BEEBOT остановлена")
 
 
@@ -158,9 +205,46 @@ app.include_router(report_router)
 app.include_router(users_router)
 
 
+# ---------------------------------------------------------------------------
+# Health check — расширенный (Шаг 7 плана)
+# ---------------------------------------------------------------------------
+
 @app.get("/api/health", tags=["health"])
-async def health_check():
-    return {"status": "ok", "service": "beebot-web"}
+async def health_check(request: Request):
+    """Расширенная проверка здоровья: CRM, сервисы, фоновые задачи."""
+    checks = {}
+
+    # CRM
+    crm = getattr(request.app.state, "crm", None)
+    checks["crm"] = {"status": "up" if crm else "down"}
+
+    # Сервисы
+    svc = getattr(request.app.state, "services", None)
+    if svc:
+        checks["order_service"] = {"status": "up" if svc.order_service else "down"}
+        checks["analytics_service"] = {"status": "up" if svc.analytics_service else "down"}
+        checks["consult_service"] = {"status": "up" if svc.consult_service else "down"}
+
+    # BGTaskManager
+    bg = getattr(request.app.state, "bg_manager", None)
+    if bg:
+        checks["bg_tasks"] = bg.status()
+
+    # EventBus
+    bus = getattr(request.app.state, "bus", None)
+    checks["event_bus"] = {"status": "up" if bus and bus.connected else "down"}
+
+    # Circuit Breaker
+    from src.web.deps import _crm_breaker
+    checks["crm_circuit_breaker"] = _crm_breaker.status()
+
+    overall = "healthy"
+    if not crm:
+        overall = "degraded"
+    if _crm_breaker.state.value == "open":
+        overall = "degraded"
+
+    return {"status": overall, "service": "beebot-web", "checks": checks}
 
 
 @app.get("/api/docs/architecture", tags=["docs"], response_class=PlainTextResponse)

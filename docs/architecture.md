@@ -1,10 +1,10 @@
 # BEEBOT — Архитектурные диаграммы
 
-> **Версия:** 3 апреля 2026 (обновлено: Service Layer refactoring)
+> **Версия:** 4 апреля 2026 (обновлено: Backend as Single Entry Point)
 
 ---
 
-## 1. Общая архитектура
+## 1. Общая архитектура: Backend как единая точка входа
 
 ```mermaid
 graph TB
@@ -15,65 +15,132 @@ graph TB
         U4["Веб-панель<br/>(Браузер)"]
     end
 
-    subgraph BOT["Telegram-бот (Docker)"]
-        HANDLERS["Роутеры aiogram<br/>admin / user / fsm / inspect / worker"]
-        ORCH["Оркестратор<br/>(LangGraph)"]
-        AGENTS["6 агентов"]
-    end
+    subgraph UNIFIED["Единый Backend (Docker)"]
+        subgraph TRANSPORT["Транспортный слой"]
+            HANDLERS["Роутеры aiogram<br/>admin / user / fsm / inspect / worker"]
+            API["FastAPI :8088<br/>9 веб-роутеров"]
+            VUE["Vue 3 PWA<br/>14 страниц"]
+        end
 
-    subgraph SVC_LAYER["Service Layer"]
-        AUTH["AuthService"]
-        ORDER_SVC["OrderService"]
-        CONSULT["ConsultService"]
-        ANALYTICS["AnalyticsService"]
-        WORKER_SVC["WorkerService"]
-        DELIVERY_SVC["DeliveryService"]
-        NOTIFY["NotificationService"]
-    end
+        STARTUP["startup.py<br/>Единая точка<br/>инициализации"]
 
-    subgraph WEB["Веб-панель (Docker)"]
-        API["FastAPI :8088"]
-        VUE["Vue 3 PWA<br/>14 страниц"]
-        BUS["BusHandlers<br/>(Redis Streams)"]
-        BG["BackgroundTaskManager"]
+        subgraph SVC_LAYER["Service Layer"]
+            AUTH["AuthService"]
+            ORDER_SVC["OrderService"]
+            CONSULT["ConsultService"]
+            ANALYTICS["AnalyticsService"]
+            DASHBOARD["DashboardService"]
+            WORKER_SVC["WorkerService"]
+            DELIVERY_SVC["DeliveryService"]
+            NOTIFY["NotificationService"]
+        end
+
+        subgraph CROSS["Cross-cutting"]
+            EVENTS["EventEmitter<br/>order.created<br/>order.status_changed"]
+            BREAKER["CircuitBreaker<br/>CRM protection"]
+            STATE["StateStore<br/>(Redis / fallback)"]
+            BG["BackgroundTaskManager<br/>5 задач"]
+        end
+
+        BUS["EventBus<br/>(Redis Streams)"]
     end
 
     subgraph INFRA["Инфраструктура"]
-        CRM_V2[("ai2o.online<br/>CRM v2")]
-        CRM_V1[("ai2o.ru<br/>CRM v1 архив")]
+        CRM[("CRM<br/>ai2o.online")]
+        REDIS[("Redis<br/>:6379")]
         KB["FAISS<br/>276 чанков"]
         LLM["Groq API<br/>llama-3.3-70b"]
         MEM["SQLite<br/>память"]
     end
 
     subgraph EXTERNAL["Внешние системы"]
-        UDS_API["UDS App<br/>(магазин)"]
+        UDS_API["UDS App"]
         CDEK_A["СДЭК API"]
         POCHTA_A["Почта России"]
     end
 
-    U1 & U2 & U3 --> BOT
+    U1 & U2 & U3 --> HANDLERS
     U4 --> VUE --> API
 
-    HANDLERS --> ORCH --> AGENTS
-    AGENTS --> SVC_LAYER
+    STARTUP -->|"создаёт"| SVC_LAYER
+    STARTUP -->|"создаёт"| CROSS
+
+    HANDLERS --> SVC_LAYER
     API --> SVC_LAYER
     BUS --> SVC_LAYER
-    SVC_LAYER --> KB & LLM & MEM & CRM_V2
-    SVC_LAYER -.->|"read-only"| CRM_V1
 
-    UDS_API -->|"polling 5 мин"| BG
+    SVC_LAYER --> KB & LLM & MEM & CRM
+    EVENTS -->|"SSE bridge"| API
+    EVENTS -->|"Redis publish"| BUS
+    STATE --> REDIS
+    BREAKER -->|"fallback при сбое"| CRM
+    BG -->|"polling 5 мин"| UDS_API
     BG -->|"авто-трекинг 2ч"| CDEK_A & POCHTA_A
 
     style SVC_LAYER fill:#e8f5e9,stroke:#22c55e
-    style CRM_V2 fill:#bbf7d0,stroke:#22c55e
-    style CRM_V1 fill:#fee2e2,stroke:#ef4444
+    style CROSS fill:#fff8e1,stroke:#f9a825
+    style CRM fill:#bbf7d0,stroke:#22c55e
     style EXTERNAL fill:#f3e5f5
+    style STARTUP fill:#e3f2fd,stroke:#1976d2
 ```
 
 ---
 
-## 2. Service Layer: архитектура слоёв
+## 2. Единая инициализация: startup.py
+
+```mermaid
+graph TB
+    subgraph ENTRY["Точки входа"]
+        BOT_ENTRY["src/bot.py<br/>python -m src.bot<br/>(polling)"]
+        WEB_ENTRY["src/web/api.py<br/>uvicorn<br/>(lifespan)"]
+    end
+
+    STARTUP["src/startup.py<br/>create_services()"]
+
+    subgraph SERVICES["Services (контейнер)"]
+        AUTH_S["AuthService"]
+        CRM_S["CRM Client<br/>(singleton)"]
+        ORDER_S["OrderService"]
+        ANALYTICS_S["AnalyticsService"]
+        CONSULT_S["ConsultService"]
+        WORKER_S["WorkerService"]
+        DELIVERY_S["DeliveryService"]
+        DASHBOARD_S["DashboardService"]
+        STATE_S["StateStore<br/>(Redis)"]
+        BG_S["BackgroundTaskManager"]
+    end
+
+    subgraph AGENTS["Агенты (тонкие обёртки)"]
+        ORCH["Orchestrator"]
+        BEEBOT_A["BeebotAgent"]
+        ANALYST_A["AnalystAgent"]
+        LOGIST_A["LogistAgent"]
+        WORKER_A["WorkerAgent"]
+        ADMIN_A["AdminChatAgent"]
+        INSPECT_A["InspectorAgent"]
+    end
+
+    BOT_ENTRY -->|"await create_services()"| STARTUP
+    WEB_ENTRY -->|"await create_services()"| STARTUP
+
+    STARTUP -->|"возвращает"| SERVICES
+    STARTUP -->|"создаёт"| AGENTS
+
+    WEB_ENTRY -->|"app.state.crm"| CRM_S
+    WEB_ENTRY -->|"set_crm_singleton()"| CRM_S
+
+    BOT_ENTRY -->|"setup_routers(svc)"| AGENTS
+
+    style STARTUP fill:#e3f2fd,stroke:#1976d2
+    style SERVICES fill:#e8f5e9,stroke:#22c55e
+    style AGENTS fill:#fff3e0
+```
+
+**Anti-pattern avoided:** «Creating new DB connections or HTTP clients inside each route handler.» Теперь один CRM-клиент на весь процесс.
+
+---
+
+## 3. Service Layer: архитектура слоёв
 
 ```mermaid
 graph TB
@@ -86,8 +153,9 @@ graph TB
     subgraph SERVICES["Service Layer (бизнес-логика)"]
         AUTH_S["AuthService<br/>роли: admin / worker / beekeeper"]
         CONSULT_S["ConsultService<br/>KB search → LLM answer"]
-        ORDER_S["OrderService<br/>CRUD + status flow + notify"]
+        ORDER_S["OrderService<br/>CRUD + status flow + events"]
         ANALYTICS_S["AnalyticsService<br/>10 типов отчётов + LLM classify"]
+        DASHBOARD_S["DashboardService<br/>stats + charts + alerts"]
         WORKER_S["WorkerService<br/>state + checklist + queue"]
         DELIVERY_S["DeliveryService<br/>СДЭК / Почта / расчёт"]
         NOTIFY_S["NotificationService<br/>Telegram push"]
@@ -130,15 +198,60 @@ graph TB
 |--------|------|-------------|----------------|
 | AuthService | `services/auth_service.py` | config (IDs) | Проверка ролей: admin, worker, beekeeper |
 | ConsultService | `services/consult_service.py` | KB, LLM, TunnelMonitor | Поиск по KB + генерация ответа, FAQ fallback |
-| OrderService | `services/order_service.py` | CRM, NotificationService | CRUD заказов, status flow, валидация |
+| OrderService | `services/order_service.py` | CRM, NotificationService, EventEmitter | CRUD заказов, status flow, валидация, события |
 | AnalyticsService | `services/analytics_service.py` | CRM, Groq | 10 типов отчётов, LLM/keyword classify |
-| WorkerService | `services/worker_service.py` | — (in-memory) | Состояние работника, чеклисты, очередь |
+| DashboardService | `services/dashboard_service.py` | CRM | Статистика, графики, алерты для веб-панели |
+| WorkerService | `services/worker_service.py` | — | Состояние работника, чеклисты, очередь |
 | DeliveryService | `services/delivery_service.py` | Calculator, Tracker | Расчёт доставки, трекинг |
 | NotificationService | `services/notification_service.py` | TelegramSender callback | Push в Telegram: пчеловод, клиент, работники |
+| StateStore | `services/state_store.py` | Redis (fallback in-memory) | Голос улья, admin mode, worker checklists |
+| EventEmitter | `services/event_emitter.py` | EventBus (опц.) | Бизнес-события → SSE + Redis |
+| CircuitBreaker | `services/circuit_breaker.py` | — | Защита от каскадных сбоев CRM |
 
 ---
 
-## 3. Оркестратор: маршрутизация интентов
+## 4. Event-Driven: CQRS + Events
+
+```mermaid
+graph LR
+    subgraph WRITE["Commands (запись)"]
+        CREATE["OrderService<br/>.create_order()"]
+        STATUS["OrderService<br/>.update_status()"]
+    end
+
+    EMITTER["EventEmitter"]
+
+    subgraph EVENTS["Events"]
+        E1["order.created"]
+        E2["order.status_changed"]
+    end
+
+    subgraph REACT["Subscribers (реакция)"]
+        SSE["SSE Bridge<br/>→ push_event()"]
+        CACHE["Cache Invalidator<br/>→ invalidate_orders_cache()"]
+        REDIS_PUB["Redis Streams<br/>→ stream:events"]
+        TG_NOTIFY["NotificationService<br/>→ Telegram push"]
+    end
+
+    CREATE -->|"await events.emit()"| EMITTER
+    STATUS -->|"await events.emit()"| EMITTER
+
+    EMITTER --> E1 & E2
+    E1 & E2 --> SSE & CACHE & REDIS_PUB
+    CREATE & STATUS -->|"direct call"| TG_NOTIFY
+
+    style WRITE fill:#e3f2fd
+    style EVENTS fill:#fff3e0
+    style REACT fill:#e8f5e9,stroke:#22c55e
+```
+
+**CQRS (простой):**
+- **Queries (чтение):** `get_orders_cache()`, `get_items_cache()` — TTL-кэш, инвалидируется событиями
+- **Commands (запись):** `create_order()`, `update_status()` — пишут в CRM, эмитят события, инвалидируют кэш
+
+---
+
+## 5. Оркестратор: маршрутизация интентов
 
 ```mermaid
 flowchart TD
@@ -170,60 +283,68 @@ flowchart TD
 
 ---
 
-## 4. Агенты: зависимости и делегирование
+## 6. Circuit Breaker + Health Check
 
 ```mermaid
-graph LR
-    subgraph AGENTS["Агенты (UI + делегирование)"]
-        BEEBOT["Консультант<br/>(beebot.py)"]
-        LOGIST["Логист<br/>(logist.py)"]
-        ANALYST["Аналитик<br/>(analyst.py)"]
-        INSPECTOR["Инспектор<br/>(inspector.py)"]
-        ADMIN_CHAT["Ассистент<br/>(admin_chat.py)"]
-        WORKER_A["Работник<br/>(worker.py)"]
-    end
-
-    subgraph SERVICES["Сервисы"]
-        CS["ConsultService"]
-        AS["AnalyticsService"]
-        OS["OrderService"]
-        WS["WorkerService"]
-    end
-
-    KB["FAISS KB"]
-    LLM["Groq LLM"]
-    CRM["CRM"]
-
-    BEEBOT -->|"делегирует"| CS
-    ANALYST -->|"делегирует"| AS
-    LOGIST -->|"делегирует"| OS
-    WORKER_A -->|"делегирует"| WS
-
-    CS --> KB & LLM
-    AS --> CRM & LLM
-    OS --> CRM
-    WS --> CRM
-    INSPECTOR --> KB & LLM
-    ADMIN_CHAT --> CRM & LLM
-
-    style AGENTS fill:#fff3e0
-    style SERVICES fill:#e8f5e9,stroke:#22c55e
+stateDiagram-v2
+    [*] --> CLOSED : Нормальная работа
+    CLOSED --> OPEN : 5 ошибок подряд
+    OPEN --> HALF_OPEN : timeout (30 сек)
+    HALF_OPEN --> CLOSED : Успешный запрос
+    HALF_OPEN --> OPEN : Ещё ошибка
 ```
 
-### Сравнительная таблица агентов
-
-| Агент | Сервис | KB | CRM | LLM | Вход | Выход |
-|---|---|---|---|---|---|---|
-| Консультант | ConsultService | Чтение | — | Groq | consult | Текст + источники |
-| Логист | OrderService | — | Запись | Groq | order (FSM) | Заказ в CRM |
-| Аналитик | AnalyticsService | — | Чтение | Groq | stats | Отчёт (текст) |
-| Инспектор | — | Чтение | — | Groq | /inspect (FSM) | Рекомендация |
-| Ассистент | — | — | CrmSnapshot | Groq | /admin | Диалог |
-| Работник | WorkerService | — | Чтение+Запись | — | /start (worker) | Кнопки |
+**`/api/health` возвращает:**
+```json
+{
+  "status": "healthy | degraded | unhealthy",
+  "checks": {
+    "crm": {"status": "up"},
+    "order_service": {"status": "up"},
+    "analytics_service": {"status": "up"},
+    "bg_tasks": {"crm_snapshot": {"state": "работает", "uptime_sec": 3600}},
+    "event_bus": {"status": "up"},
+    "crm_circuit_breaker": {"state": "closed", "failures": 0, "threshold": 5}
+  }
+}
+```
 
 ---
 
-## 5. BackgroundTaskManager: фоновые задачи
+## 7. StateStore: Redis shared state
+
+```mermaid
+graph TB
+    subgraph PROCESSES["Процессы"]
+        BOT["beebot<br/>(polling)"]
+        WEB["beebot-web<br/>(FastAPI)"]
+    end
+
+    subgraph STORE["StateStore"]
+        REDIS_STORE["Redis :6379"]
+        FALLBACK["In-memory<br/>(fallback)"]
+    end
+
+    subgraph KEYS["Redis Keys"]
+        K1["beebot:user_styles<br/>(Hash)"]
+        K2["beebot:admin_mode<br/>(Set)"]
+        K3["beebot:admin_view<br/>(Hash)"]
+        K4["beebot:worker:checklist:*<br/>(Set per order)"]
+    end
+
+    BOT --> STORE
+    WEB --> STORE
+    STORE --> KEYS
+
+    style STORE fill:#e8f5e9,stroke:#22c55e
+    style KEYS fill:#fff8e1
+```
+
+**Best practice:** Состояние переживает рестарт. Worker checklists не теряются.
+
+---
+
+## 8. BackgroundTaskManager: фоновые задачи
 
 ```mermaid
 graph LR
@@ -243,11 +364,11 @@ graph LR
 **Возможности:**
 - Авто-рестарт при падении (экспоненциальная пауза, макс 60 сек)
 - Мониторинг: `bg.status()` → состояние, uptime, число рестартов
-- Graceful shutdown: `bg.stop_all()` при остановке бота
+- Graceful shutdown: `bg.stop_all()` при остановке
 
 ---
 
-## 6. Жизненный цикл заказа
+## 9. Жизненный цикл заказа
 
 ```mermaid
 stateDiagram-v2
@@ -269,13 +390,13 @@ stateDiagram-v2
 
 | Источник | Как попадает | Уведомления |
 |----------|-------------|-------------|
-| Telegram FSM | LogistAgent → OrderService → CRM | Пчеловод + работники |
+| Telegram FSM | LogistAgent → OrderService → CRM → EventEmitter | Пчеловод + работники + SSE |
 | UDS-магазин | UDSPoller → CRM | Пчеловод + работники |
-| Веб-панель | orders.py → CRM | Только пчеловод |
+| Веб-панель | orders.py → OrderService → CRM → EventEmitter | Пчеловод + SSE |
 
 ---
 
-## 7. CRM: две системы
+## 10. CRM: две системы
 
 ```mermaid
 graph TB
@@ -283,6 +404,7 @@ graph TB
         FF{{"INTEGRAM_V2<br/>feature flag"}}
         V1_CL["IntegramClient<br/>(v1)"]
         V2_CL["IntegramV2Client<br/>(v2)"]
+        PROXY["_SingletonCrmProxy<br/>close() = no-op"]
     end
 
     subgraph V1["ai2o.ru (АРХИВ)"]
@@ -295,70 +417,29 @@ graph TB
 
     FF -->|"true"| V2_CL --> V2_DB
     FF -->|"false"| V1_CL --> V1_DB
+    V1_CL & V2_CL --> PROXY
 
     style V1 fill:#fee2e2
     style V2 fill:#bbf7d0
     style FF fill:#fef3c7
+    style PROXY fill:#e3f2fd
 ```
 
-### Схема таблиц CRM v2
-
-```mermaid
-erDiagram
-    CATEGORIES["Категории (151)"] ||--o{ PRODUCTS["Товары (581)"] : "группирует"
-    SOURCES["Источники (15)"] ||--o{ CLIENTS["Клиенты (52)"] : "канал"
-    SOURCES ||--o{ ORDERS["Заказы (60)"] : "канал"
-    STATUSES["Статусы (152)"] ||--o{ ORDERS : "текущий"
-    DELIVERY["Доставка (150)"] ||--o{ ORDERS : "способ"
-    CLIENTS ||--o{ ORDERS : "размещает"
-    ORDERS ||--o{ ORDER_ITEMS["Позиции (78)"] : "содержит"
-    PRODUCTS ||--o{ ORDER_ITEMS : "товар"
-
-    PRODUCTS {
-        int id PK
-        string name
-        float price
-        int stock
-        ref category
-    }
-
-    CLIENTS {
-        int id PK
-        string full_name
-        string phone
-        int telegram_id
-        string city
-    }
-
-    ORDERS {
-        int id PK
-        datetime date
-        ref client
-        ref status
-        ref delivery
-        float total
-        string tracking
-    }
-
-    ORDER_ITEMS {
-        int id PK
-        ref order
-        ref product
-        int quantity
-        float price
-    }
-```
+**Singleton CRM:** создаётся один раз в `startup.py`, оборачивается в `_SingletonCrmProxy` (close() — no-op), раздаётся 37 роутерам через `_get_crm()`.
 
 ---
 
-## 8. Инфраструктура: туннели и деплой
+## 11. Инфраструктура: единый Docker-образ
 
 ```mermaid
 graph TB
     subgraph VPS["VPS 185.233.200.13"]
-        BOT_C["beebot<br/>~762 MiB"]
-        WEB_C["beebot-web<br/>:8088"]
-        REDIS_C["Redis<br/>:6379"]
+        subgraph DOCKER["Docker Compose"]
+            BOT_C["beebot<br/>python -m src.bot<br/>~762 MiB"]
+            WEB_C["beebot-web<br/>uvicorn :8088<br/>+ Vue dist"]
+            REDIS_C["Redis<br/>:6379<br/>32 MiB"]
+        end
+        NOTE_IMG["Один образ:<br/>Python + FAISS +<br/>Node build → Vue dist"]
     end
 
     subgraph HIVE["Hive (локальная)"]
@@ -378,26 +459,31 @@ graph TB
 
     BOT_C -->|"SSH tunnel"| GROQ_P --> GROQ_API
     BOT_C -->|"SOCKS5"| SOCKS --> TG_API
-    BOT_C --> REDIS_C --> WEB_C
+    BOT_C & WEB_C --> REDIS_C
     BOT_C & WEB_C --> CRM_V2_C
     BOT_C -->|"polling 5 мин"| UDS_C
     WEB_C --> CDEK & POCHTA
 
+    NOTE_IMG -.->|"единый<br/>Dockerfile"| BOT_C & WEB_C
+
     style VPS fill:#e3f2fd
     style HIVE fill:#f3e5f5
+    style NOTE_IMG fill:#fff8e1,stroke:#f9a825
 ```
 
 ### Docker-контейнеры
 
-| Контейнер | Образ | RAM | Порт |
-|-----------|-------|-----|------|
-| redis | redis:7-alpine | ~20 MiB | 6379 |
-| beebot | Python 3.12 + FAISS + Groq | ~762 MiB | — |
-| beebot-web | Python 3.12 + Vue dist | ~50 MiB | 8088 |
+| Контейнер | Образ | Команда | RAM | Порт |
+|-----------|-------|---------|-----|------|
+| redis | redis:7-alpine | — | ~20 MiB | 6379 |
+| beebot | **Единый** (Python + FAISS + Vue) | `python -m src.bot` | ~762 MiB | — |
+| beebot-web | **Единый** (тот же образ) | `uvicorn src.web.server:app` | ~200 MiB | 8088 |
+
+**Было:** два Dockerfile (Dockerfile + Dockerfile.web). **Стало:** один Dockerfile с multi-stage (Node → Vue build + Python deps).
 
 ---
 
-## 9. Файловая структура: четыре слоя
+## 12. Файловая структура: пять слоёв
 
 ```mermaid
 graph TB
@@ -407,14 +493,22 @@ graph TB
         REDIS_T["Redis Streams<br/>bus_handlers.py"]
     end
 
-    subgraph SVC["Service Layer"]
+    subgraph INIT["Инициализация"]
+        STARTUP_F["startup.py<br/>create_services()"]
+    end
+
+    subgraph SVC["Service Layer (10 сервисов)"]
         AUTH_F["auth_service.py"]
         CONSULT_F["consult_service.py"]
         ORDER_F["order_service.py"]
         ANALYTICS_F["analytics_service.py"]
+        DASHBOARD_F["dashboard_service.py"]
         WORKER_F["worker_service.py"]
         DELIVERY_F["delivery_service.py"]
         NOTIFY_F["notification_service.py"]
+        STATE_F["state_store.py"]
+        EVENTS_F["event_emitter.py"]
+        CB_F["circuit_breaker.py"]
     end
 
     subgraph AGENTS_F["Агенты (обёртки)"]
@@ -434,12 +528,13 @@ graph TB
         MEM_F["memory.py<br/>SQLite"]
     end
 
-    TRANSPORT --> SVC
+    TRANSPORT --> INIT --> SVC
     TRANSPORT --> AGENTS_F
     AGENTS_F --> SVC
     SVC --> INFRA_F
 
     style TRANSPORT fill:#e3f2fd
+    style INIT fill:#fff8e1,stroke:#f9a825
     style SVC fill:#e8f5e9,stroke:#22c55e
     style AGENTS_F fill:#fff3e0
     style INFRA_F fill:#f5f5f5
@@ -447,7 +542,7 @@ graph TB
 
 ---
 
-## 10. Поток консультации: пользователь → ответ
+## 13. Поток консультации: пользователь → ответ
 
 ```mermaid
 sequenceDiagram
@@ -476,7 +571,7 @@ sequenceDiagram
 
 ---
 
-## 11. Поток заказа: FSM 7 шагов
+## 14. Поток заказа: FSM → OrderService → Events
 
 ```mermaid
 sequenceDiagram
@@ -486,6 +581,8 @@ sequenceDiagram
     participant Logist as LogistAgent
     participant OS as OrderService
     participant CRM as Integram CRM
+    participant EE as EventEmitter
+    participant SSE as SSE (веб-панель)
 
     User->>Bot: /order
     Bot->>FSM: start
@@ -503,12 +600,15 @@ sequenceDiagram
     Logist->>OS: create_order()
     OS->>CRM: create_order()
     OS->>OS: notify (пчеловод + работники)
+    OS->>EE: emit("order.created", {...})
+    EE->>SSE: push_event() → веб-панель обновляется
+    EE->>EE: invalidate_orders_cache()
     Bot-->>User: "Заказ #TG-20260402 создан!"
 ```
 
 ---
 
-## 12. UDS-синхронизация: магазин → CRM
+## 15. UDS-синхронизация: магазин → CRM
 
 ```mermaid
 sequenceDiagram
@@ -549,19 +649,9 @@ sequenceDiagram
     end
 ```
 
-### Компоненты UDS-интеграции
-
-| Компонент | Файл | Назначение |
-|-----------|------|-----------|
-| UDSClient | src/integrations/uds.py | REST-клиент UDS Partner API v2 (Basic Auth, retry 3×) |
-| UDSPoller | src/integrations/uds.py | Фоновый polling + catch-up + дедупликация |
-| TransactionDeduplicator | src/integrations/uds.py | Хранит обработанные ID, загружает из CRM при старте |
-| sync_uds_transaction() | src/integrations/uds.py | Транзакция → клиент → товары по SKU → заказ → уведомление |
-| sync_uds_catalog() | src/integrations/uds.py | Сопоставление каталога UDS ↔ Integram по артикулу |
-
 ---
 
-## 13. Голос Улья: 5 стилей
+## 16. Голос Улья: 5 стилей
 
 | Стиль | Описание | Когда использовать |
 |-------|---------|-------------------|

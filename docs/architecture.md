@@ -53,8 +53,8 @@ graph TB
         end
     end
 
-    subgraph COMMS["Шина событий (кросс-процесс)"]
-        BUS["EventBus<br/>(Redis Streams)"]
+    subgraph COMMS["Шина событий"]
+        BUS["EventBus<br/>(Redis Streams —<br/>для внешних подписчиков)"]
     end
 
     subgraph INFRA["Инфраструктура"]
@@ -86,7 +86,6 @@ graph TB
 
     EVENTS -->|"SSE → веб-панель"| API
     EVENTS -->|"publish"| BUS
-    BUS -->|"beebot ↔ beebot-web"| EVENTS
     STATE --> REDIS
     BREAKER -->|"fallback при сбое"| CRM
     BG -->|"polling 5 мин"| UDS_API
@@ -103,20 +102,22 @@ graph TB
 
 ---
 
-## 2. Единая инициализация: startup.py
+## 2. Единая инициализация: один процесс
 
 ```mermaid
 graph TB
-    subgraph ENTRY["Точки входа"]
-        BOT_ENTRY["src/bot.py<br/>python -m src.bot<br/>(polling)"]
-        WEB_ENTRY["src/web/api.py<br/>uvicorn<br/>(lifespan)"]
-    end
+    ENTRY["src/bot.py<br/>python -m src.bot"]
 
     STARTUP["src/startup.py<br/>create_services()"]
 
-    subgraph SERVICES["Services (контейнер)"]
+    subgraph PROCESS["Один процесс (asyncio.gather)"]
+        POLLING["dp.start_polling(bot)<br/>Telegram polling"]
+        UVICORN["uvicorn.Server.serve()<br/>FastAPI :8088"]
+    end
+
+    subgraph SERVICES["Services (контейнер, singleton)"]
         AUTH_S["AuthService"]
-        CRM_S["CRM Client<br/>(singleton)"]
+        CRM_S["CRM Client"]
         ORDER_S["OrderService"]
         ANALYTICS_S["AnalyticsService"]
         CONSULT_S["ConsultService"]
@@ -137,23 +138,25 @@ graph TB
         INSPECT_A["InspectorAgent"]
     end
 
-    BOT_ENTRY -->|"await create_services()"| STARTUP
-    WEB_ENTRY -->|"await create_services()"| STARTUP
-
+    ENTRY -->|"1. create_services()"| STARTUP
     STARTUP -->|"возвращает"| SERVICES
     STARTUP -->|"создаёт"| AGENTS
 
-    WEB_ENTRY -->|"app.state.crm"| CRM_S
-    WEB_ENTRY -->|"set_crm_singleton()"| CRM_S
+    ENTRY -->|"2. setup_routers(svc)"| AGENTS
+    ENTRY -->|"3. inject_services(svc)"| UVICORN
+    ENTRY -->|"4. asyncio.gather()"| PROCESS
 
-    BOT_ENTRY -->|"setup_routers(svc)"| AGENTS
+    POLLING -->|"использует"| AGENTS
+    UVICORN -->|"использует"| SERVICES
 
+    style ENTRY fill:#e3f2fd,stroke:#1976d2
     style STARTUP fill:#e3f2fd,stroke:#1976d2
     style SERVICES fill:#e8f5e9,stroke:#22c55e
     style AGENTS fill:#fff3e0
+    style PROCESS fill:#fff8e1,stroke:#f9a825
 ```
 
-**Anti-pattern avoided:** «Creating new DB connections or HTTP clients inside each route handler.» Теперь один CRM-клиент на весь процесс.
+**Один процесс:** бот и веб-панель делят сервисы в памяти — без Redis для EventEmitter, без дублирования FAISS/CRM.
 
 ---
 
@@ -332,10 +335,7 @@ stateDiagram-v2
 
 ```mermaid
 graph TB
-    subgraph PROCESSES["Процессы"]
-        BOT["beebot<br/>(polling)"]
-        WEB["beebot-web<br/>(FastAPI)"]
-    end
+    BEEBOT["beebot<br/>(polling + FastAPI)"]
 
     subgraph STORE["StateStore"]
         REDIS_STORE["Redis :6379"]
@@ -349,15 +349,14 @@ graph TB
         K4["beebot:worker:checklist:*<br/>(Set per order)"]
     end
 
-    BOT --> STORE
-    WEB --> STORE
+    BEEBOT --> STORE
     STORE --> KEYS
 
     style STORE fill:#e8f5e9,stroke:#22c55e
     style KEYS fill:#fff8e1
 ```
 
-**Best practice:** Состояние переживает рестарт. Worker checklists не теряются.
+**Best practice:** Состояние переживает рестарт. Worker checklists не теряются. В unified-режиме Redis нужен только для персистентности (не для IPC).
 
 ---
 
@@ -446,17 +445,15 @@ graph TB
 
 ---
 
-## 11. Инфраструктура: единый Docker-образ
+## 11. Инфраструктура: один контейнер
 
 ```mermaid
 graph TB
     subgraph VPS["VPS 185.233.200.13"]
         subgraph DOCKER["Docker Compose"]
-            BOT_C["beebot<br/>python -m src.bot<br/>~762 MiB"]
-            WEB_C["beebot-web<br/>uvicorn :8088<br/>+ Vue dist"]
+            BOT_C["beebot<br/>python -m src.bot<br/>polling + uvicorn :8088<br/>~762 MiB"]
             REDIS_C["Redis<br/>:6379<br/>32 MiB"]
         end
-        NOTE_IMG["Один образ:<br/>Python + FAISS +<br/>Node build → Vue dist"]
     end
 
     subgraph HIVE["Hive (локальная)"]
@@ -476,16 +473,14 @@ graph TB
 
     BOT_C -->|"SSH tunnel"| GROQ_P --> GROQ_API
     BOT_C -->|"SOCKS5"| SOCKS --> TG_API
-    BOT_C & WEB_C --> REDIS_C
-    BOT_C & WEB_C --> CRM_V2_C
+    BOT_C --> REDIS_C
+    BOT_C --> CRM_V2_C
     BOT_C -->|"polling 5 мин"| UDS_C
-    WEB_C --> CDEK & POCHTA
-
-    NOTE_IMG -.->|"единый<br/>Dockerfile"| BOT_C & WEB_C
+    BOT_C --> CDEK & POCHTA
 
     style VPS fill:#e3f2fd
     style HIVE fill:#f3e5f5
-    style NOTE_IMG fill:#fff8e1,stroke:#f9a825
+    style BOT_C fill:#e8f5e9,stroke:#22c55e
 ```
 
 ### Docker-контейнеры
@@ -493,10 +488,9 @@ graph TB
 | Контейнер | Образ | Команда | RAM | Порт |
 |-----------|-------|---------|-----|------|
 | redis | redis:7-alpine | — | ~20 MiB | 6379 |
-| beebot | **Единый** (Python + FAISS + Vue) | `python -m src.bot` | ~762 MiB | — |
-| beebot-web | **Единый** (тот же образ) | `uvicorn src.web.server:app` | ~200 MiB | 8088 |
+| beebot | Python + FAISS + Vue | `python -m src.bot` | ~762 MiB | 8088 |
 
-**Было:** два Dockerfile (Dockerfile + Dockerfile.web). **Стало:** один Dockerfile с multi-stage (Node → Vue build + Python deps).
+**Один процесс:** бот (polling) + веб-панель (uvicorn) + фоновые задачи — всё в `asyncio.gather()`. Экономия ~400 MiB RAM (нет дублирования FAISS, fastembed, CRM).
 
 ---
 

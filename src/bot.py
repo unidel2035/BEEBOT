@@ -1,15 +1,15 @@
-"""Telegram bot for BEEBOT — тонкий клиент.
+"""Telegram bot for BEEBOT — единая точка входа.
 
-Бот — это транспортный слой. Вся бизнес-логика живёт в Service Layer (src/services/),
-сервисы создаются в src/startup.py (единая точка инициализации).
+Один процесс запускает и Telegram polling, и FastAPI (uvicorn).
+Сервисы создаются один раз в startup.py и разделяются между ботом и веб-панелью.
 
-Best practice: «The bot layer should only do two things:
-(1) Chain of Responsibility for routing, (2) FSM for conversation state.
-All business logic lives elsewhere.» — DEV Community
+Best practice: «Run bot and web server in the same asyncio loop
+to share services without IPC overhead.»
 """
 
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -107,8 +107,29 @@ def setup_routers(svc: Services) -> None:
             logger.info("Режим работника склада включён (%d работников).", len(WORKER_CHAT_IDS))
 
 
+async def _run_web(svc: Services) -> None:
+    """Запустить FastAPI (uvicorn) в том же event loop."""
+    import uvicorn
+    from src.web.api import inject_services
+
+    # Передать сервисы в FastAPI (unified-режим — без повторного create_services)
+    inject_services(svc)
+
+    host = os.getenv("WEB_HOST", "0.0.0.0")
+    port = int(os.getenv("WEB_PORT", "8088"))
+
+    config = uvicorn.Config(
+        "src.web.server:app",
+        host=host,
+        port=port,
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
 async def main():
-    """Standalone-режим: бот запускается как отдельный процесс (polling)."""
+    """Unified-режим: бот + веб-панель в одном процессе."""
     global bot
     setup_logging()
 
@@ -117,7 +138,7 @@ async def main():
         bot = Bot(token=TELEGRAM_BOT_TOKEN, session=AiohttpSession(proxy=TG_SOCKS_PROXY))
         logger.info("Telegram via SOCKS5 proxy: %s", TG_SOCKS_PROXY)
 
-    logger.info("Starting BEEBOT...")
+    logger.info("Starting BEEBOT (unified: bot + web)...")
 
     # --- Создание всех сервисов через единую точку ---
     svc = await create_services(alert_fn=_alert, send_telegram=_send_tg)
@@ -128,13 +149,16 @@ async def main():
     # --- Фоновые задачи ---
     await start_background_tasks(svc, bot=bot, alert_fn=_alert)
 
-    logger.info("Bot is running!")
+    logger.info("Bot + Web are running!")
     _crashed = False
     try:
-        await dp.start_polling(bot)
+        await asyncio.gather(
+            dp.start_polling(bot),
+            _run_web(svc),
+        )
     except Exception as exc:
         _crashed = True
-        logger.exception("Критическая ошибка бота: %s", exc)
+        logger.exception("Критическая ошибка: %s", exc)
         await _alert(f"❌ BEEBOT упал: {exc}")
         raise
     finally:

@@ -38,5 +38,6 @@ COPY data/pdfs/ data/pdfs/
 # Copy built Vue frontend
 COPY --from=frontend-build /app/web/dist /app/web/dist
 
-# Default: бот (polling). Web запускается отдельным CMD в docker-compose.
+# Unified: бот (polling) + веб-панель (uvicorn :8088) в одном процессе
+EXPOSE 8088
 CMD ["python", "-m", "src.bot"]

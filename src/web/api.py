@@ -1,19 +1,12 @@
-"""FastAPI-бэкенд — единая точка входа для веб-панели и (в перспективе) бота.
+"""FastAPI-бэкенд — веб-панель BEEBOT.
 
-Все сервисы создаются через src/startup.py (единый Service Layer).
-CRM-клиент — singleton на весь процесс (не создаётся заново на каждый запрос).
+В unified-режиме (один процесс) сервисы создаются в bot.py и передаются
+через inject_services(). В standalone-режиме (только uvicorn) — lifespan
+вызывает create_services() сам.
 
 Best practice: FastAPI Lifespan pattern — singleton сервисы через app.state.
 Anti-pattern avoided: «Creating new DB connections or HTTP clients inside
 each route handler» — singletons created once in lifespan.
-
-Конфигурация через .env:
-  WEB_USERNAME      — логин администратора-фоллбэк (по умолчанию: admin)
-  WEB_PASSWORD      — пароль администратора-фоллбэк (ОБЯЗАТЕЛЬНО)
-  WEB_SECRET        — секрет JWT (ОБЯЗАТЕЛЬНО)
-  WEB_TOKEN_TTL     — время жизни токена в минутах (по умолчанию: 60)
-  WEB_CORS_ORIGINS  — разрешённые домены через запятую
-  WEB_INTERNAL_SECRET — секрет для внутреннего SSE-эндпоинта
 """
 
 from __future__ import annotations
@@ -77,49 +70,68 @@ async def _telegram_alert(text: str) -> None:
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
+# --- Shared services (injected from bot.py in unified mode) ---
+_shared_services = None
+
+
+def inject_services(svc) -> None:
+    """Передать готовые сервисы из bot.py (unified-режим, один процесс)."""
+    global _shared_services
+    _shared_services = svc
+
+
+def _apply_services(app: FastAPI, svc) -> None:
+    """Записать сервисы в app.state для веб-роутеров."""
+    app.state.services = svc
+    set_crm_singleton(svc.crm)
+    app.state.crm = svc.crm
+    app.state.order_service = svc.order_service
+    app.state.analytics_service = svc.analytics_service
+    app.state.consult_service = svc.consult_service
+    app.state.worker_service = svc.worker_service
+    app.state.delivery_service = svc.delivery_service
+    app.state.auth = svc.auth
+    app.state.dashboard_service = svc.dashboard_service
+    app.state.bg_manager = svc.bg_manager
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from src.logging_config import setup_logging
     setup_logging()
 
-    # --- Единый Service Layer через startup.py ---
-    svc = None
-    try:
-        from src.startup import create_services
-        svc = await create_services(alert_fn=_telegram_alert)
-        app.state.services = svc
+    # --- Unified или standalone? ---
+    svc = _shared_services
+    standalone = svc is None
 
-        # Singleton CRM для deps._get_crm() (все 37 роутеров используют его)
-        set_crm_singleton(svc.crm)
+    if standalone:
+        # Standalone-режим: uvicorn запущен отдельно, создаём сервисы сами
+        try:
+            from src.startup import create_services
+            svc = await create_services(alert_fn=_telegram_alert)
+        except Exception as e:
+            app.state.services = None
+            app.state.order_service = None
+            app.state.crm = None
+            logger.warning("Service Layer недоступен: %s", e)
+            svc = None
 
-        # Singleton-сервисы для веб-роутеров
-        app.state.crm = svc.crm
-        app.state.order_service = svc.order_service
-        app.state.analytics_service = svc.analytics_service
-        app.state.consult_service = svc.consult_service
-        app.state.worker_service = svc.worker_service
-        app.state.delivery_service = svc.delivery_service
-        app.state.auth = svc.auth
-        app.state.dashboard_service = svc.dashboard_service
-        app.state.bg_manager = svc.bg_manager
-        logger.info("Service Layer инициализирован (единая точка)")
-    except Exception as e:
+    if svc:
+        _apply_services(app, svc)
+        logger.info("Service Layer инициализирован (%s)", "standalone" if standalone else "unified")
+    else:
         app.state.services = None
         app.state.order_service = None
         app.state.crm = None
-        logger.warning("Service Layer недоступен: %s", e)
 
     # --- EventEmitter → SSE bridge + CQRS cache invalidation ---
     from src.services.event_emitter import events
     from src.web.deps import invalidate_orders_cache, invalidate_items_cache
 
     async def _sse_bridge(event_type: str, data: dict):
-        """Пробросить бизнес-события в SSE для веб-панели."""
         await push_event(event_type, data)
 
     async def _invalidate_caches(event_type: str, data: dict):
-        """CQRS: запись → инвалидация read model (кэшей)."""
         if event_type in ("order.created", "order.status_changed"):
             invalidate_orders_cache()
             invalidate_items_cache()
@@ -151,15 +163,18 @@ async def lifespan(app: FastAPI):
         app.state.bus = None
         logger.warning("EventBus недоступен (продолжаем без него): %s", e)
 
-    await _telegram_alert("🌐 Веб-панель BEEBOT запущена")
+    if standalone:
+        await _telegram_alert("🌐 Веб-панель BEEBOT запущена (standalone)")
     yield
 
     # --- Shutdown ---
     if bus:
         await bus.close()
-    if svc:
+    # В unified-режиме сервисы закрывает bot.py
+    if standalone and svc:
         await svc.close()
-    await _telegram_alert("🌐 Веб-панель BEEBOT остановлена")
+    if standalone:
+        await _telegram_alert("🌐 Веб-панель BEEBOT остановлена")
 
 
 app = FastAPI(
@@ -244,7 +259,7 @@ async def health_check(request: Request):
     if _crm_breaker.state.value == "open":
         overall = "degraded"
 
-    return {"status": overall, "service": "beebot-web", "checks": checks}
+    return {"status": overall, "service": "beebot", "checks": checks}
 
 
 @app.get("/api/docs/architecture", tags=["docs"], response_class=PlainTextResponse)

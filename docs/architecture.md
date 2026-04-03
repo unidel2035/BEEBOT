@@ -24,6 +24,16 @@ graph TB
 
         STARTUP["startup.py<br/>Единая точка<br/>инициализации"]
 
+        subgraph AGENTS["Агенты (тонкие обёртки)"]
+            ORCH["Оркестратор<br/>(LangGraph)"]
+            BEEBOT_A["BeebotAgent"]
+            ANALYST_A["AnalystAgent"]
+            LOGIST_A["LogistAgent"]
+            WORKER_A["WorkerAgent"]
+            ADMIN_A["AdminChatAgent"]
+            INSPECT_A["InspectorAgent"]
+        end
+
         subgraph SVC_LAYER["Service Layer"]
             AUTH["AuthService"]
             ORDER_SVC["OrderService"]
@@ -41,7 +51,9 @@ graph TB
             STATE["StateStore<br/>(Redis / fallback)"]
             BG["BackgroundTaskManager<br/>5 задач"]
         end
+    end
 
+    subgraph COMMS["Шина событий (кросс-процесс)"]
         BUS["EventBus<br/>(Redis Streams)"]
     end
 
@@ -62,26 +74,31 @@ graph TB
     U1 & U2 & U3 --> HANDLERS
     U4 --> VUE --> API
 
+    STARTUP -->|"создаёт"| AGENTS
     STARTUP -->|"создаёт"| SVC_LAYER
     STARTUP -->|"создаёт"| CROSS
 
-    HANDLERS --> SVC_LAYER
+    HANDLERS --> ORCH --> AGENTS
+    AGENTS -->|"делегируют"| SVC_LAYER
     API --> SVC_LAYER
-    BUS --> SVC_LAYER
 
     SVC_LAYER --> KB & LLM & MEM & CRM
-    EVENTS -->|"SSE bridge"| API
-    EVENTS -->|"Redis publish"| BUS
+
+    EVENTS -->|"SSE → веб-панель"| API
+    EVENTS -->|"publish"| BUS
+    BUS -->|"beebot ↔ beebot-web"| EVENTS
     STATE --> REDIS
     BREAKER -->|"fallback при сбое"| CRM
     BG -->|"polling 5 мин"| UDS_API
     BG -->|"авто-трекинг 2ч"| CDEK_A & POCHTA_A
 
     style SVC_LAYER fill:#e8f5e9,stroke:#22c55e
+    style AGENTS fill:#fff3e0
     style CROSS fill:#fff8e1,stroke:#f9a825
     style CRM fill:#bbf7d0,stroke:#22c55e
     style EXTERNAL fill:#f3e5f5
     style STARTUP fill:#e3f2fd,stroke:#1976d2
+    style COMMS fill:#fce4ec,stroke:#e91e63
 ```
 
 ---

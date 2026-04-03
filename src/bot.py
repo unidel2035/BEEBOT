@@ -17,6 +17,7 @@ from src.integrations.uds import UDSClient, UDSPoller
 from src.crm_factory import get_crm_client
 from src.services.order_service import OrderService
 from src.services.notification_service import NotificationService
+from src.services.auth_service import AuthService
 from src.agents.logist import LogistAgent
 from src.agents.inspector import InspectorAgent
 from src.agents.admin_chat import AdminChatAgent
@@ -26,7 +27,6 @@ from src.crm_agent import CrmAgent
 from src.anamnesis import AnamnesisCache
 from src.gift_protocol import GiftBroker
 from src.agent_specs import AgentSpecsCache
-from src.agent_bus import create_agent_bus_client
 from src.backup import BackupManager
 from src.admin import router as admin_router, setup_admin
 from src.logging_config import setup_logging
@@ -152,7 +152,15 @@ async def main():
         logger.warning("Онтология недоступна (продолжаем без неё): %s", _e)
 
     admin_chat_agent.set_crm(integram_client)
-    setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory)
+
+    # --- AuthService — единая проверка ролей ---
+    auth = AuthService(
+        admin_ids=ADMIN_IDS,
+        worker_ids=WORKER_CHAT_IDS,
+        beekeeper_id=BEEKEEPER_CHAT_ID,
+    )
+
+    setup_admin(bot, crm=integram_client, kb=kb, memory=orchestrator._memory, auth=auth)
 
     # --- Gift Protocol: CrmAgent + AnamnesisCache + GiftBroker (Фаза 9) ---
     crm_agent = CrmAgent(integram_client)   # None если integram_client=None — ОК
@@ -177,23 +185,27 @@ async def main():
     # --- Инициализация роутеров ---
     setup_inspect(inspector)
     setup_fsm_order(logist, bot)
-    setup_bot_admin(analyst, orchestrator, admin_chat_agent, inspector, bot)
-    setup_user(orchestrator, admin_chat_agent, logist, gift_broker=gift_broker)
+    setup_bot_admin(analyst, orchestrator, admin_chat_agent, inspector, bot, auth=auth)
+    setup_user(orchestrator, admin_chat_agent, logist, gift_broker=gift_broker, auth=auth)
 
     # --- Режим работника склада ---
     if integram_client:
-        setup_worker(integram_client, bot, gift_broker=gift_broker)
+        setup_worker(integram_client, bot, gift_broker=gift_broker, auth=auth)
         from src.notifications import Notifier
         import src.notifications as _notif_module
         _notif_module._worker_notifier = Notifier(bot)
         if WORKER_CHAT_IDS:
             logger.info("Режим работника склада включён (%d работников).", len(WORKER_CHAT_IDS))
 
+    # --- BackgroundTaskManager — управляемые фоновые задачи ---
+    from src.web.bg_tasks import BackgroundTaskManager
+    bg = BackgroundTaskManager(alert_fn=_alert)
+
     # --- CRM Snapshot ---
     if integram_client:
         from src.crm_snapshot import CrmSnapshot
         _state._crm_snapshot = CrmSnapshot(integram_client, alert_fn=_alert)
-        asyncio.create_task(_state._crm_snapshot.run())
+        await bg.start("crm_snapshot", _state._crm_snapshot.run)
         logger.info("CRM snapshot запущен (интервал %d сек).", _state._crm_snapshot._refresh_interval)
 
     # --- Авто-трекинг ---
@@ -204,11 +216,10 @@ async def main():
             crm=integram_client,
             notify_fn=notify_client_status_change,
         )
-        asyncio.create_task(order_tracker.run())
+        await bg.start("order_tracker", order_tracker.run)
         logger.info("Авто-трекинг отправлений запущен.")
 
     # --- UDS Poller ---
-    uds_poller: Optional[UDSPoller] = None
     uds_client: Optional[UDSClient] = None
 
     if app_config.UDS_API_KEY and app_config.UDS_COMPANY_ID:
@@ -221,7 +232,7 @@ async def main():
                     bot=bot,
                     notify_chat_id=BEEKEEPER_CHAT_ID,
                 )
-                asyncio.create_task(uds_poller.run())
+                await bg.start("uds_poller", uds_poller.run)
                 logger.info("UDS Poller запущен.")
             except Exception as e:
                 logger.warning("UDS Poller не удалось запустить: %s", e)
@@ -234,7 +245,7 @@ async def main():
     from src.tunnel_monitor import TunnelMonitor
     _tunnel_monitor = TunnelMonitor(alert_fn=_alert)
     orchestrator._beebot.tunnel_monitor = _tunnel_monitor
-    asyncio.create_task(_tunnel_monitor.run())
+    await bg.start("tunnel_monitor", _tunnel_monitor.run)
     logger.info("TunnelMonitor запущен (порт 8990).")
 
     # --- BackupManager — Яндекс Диск (Фаза 12.2) ---
@@ -242,21 +253,11 @@ async def main():
         memory_db_path=app_config.MEMORY_DB_PATH,
         crm=integram_client,
     )
-    asyncio.create_task(_backup.run())
+    await bg.start("backup", _backup.run)
     if _backup.available:
         logger.info("BackupManager запущен (daily memory.db + weekly CRM CSV).")
     else:
         logger.info("BackupManager: YADISK_TOKEN не задан — бэкапы отключены.")
-
-    # --- AgentBus — регистрация в dronedoc2026 (Фаза 11.2) ---
-    _agent_bus = create_agent_bus_client()
-    if _agent_bus:
-        await _agent_bus.start(
-            kb=orchestrator._beebot.kb,
-            crm=integram_client,
-        )
-    else:
-        logger.info("AgentBus: AGENT_BUS_URL не задан — работаем автономно.")
 
     logger.info("Bot is running!")
     _crashed = False
@@ -270,10 +271,7 @@ async def main():
     finally:
         if not _crashed:
             await _alert("🔴 BEEBOT остановлен")
-        if order_tracker:
-            order_tracker.stop()
-        if uds_poller:
-            uds_poller.stop()
+        await bg.stop_all()
         if uds_client:
             await uds_client.close()
         if integram_client:

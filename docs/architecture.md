@@ -1,126 +1,223 @@
 # BEEBOT — Архитектурные диаграммы
 
-> **Версия:** 3 апреля 2026 (обновлено: Service Layer refactoring)
+> **Версия:** 4 апреля 2026 — Unified Process (один контейнер, один процесс)
 
 ---
 
-## 1. Общая архитектура
+## 1. Общая архитектура: один процесс
 
 ```mermaid
 graph TB
-    subgraph USERS["Пользователи"]
-        U1["Подписчики<br/>(Telegram)"]
-        U2["Пчеловод<br/>(Admin)"]
-        U3["Работники<br/>(Worker)"]
-        U4["Веб-панель<br/>(Браузер)"]
+    subgraph CLIENTS["Клиенты (вне сервера)"]
+        TG_USERS["Подписчики / Пчеловод / Работники<br/>(Telegram)"]
+        BROWSER["Браузер<br/>(Vue 3 PWA)"]
     end
 
-    subgraph BOT["Telegram-бот (Docker)"]
-        HANDLERS["Роутеры aiogram<br/>admin / user / fsm / inspect / worker"]
-        ORCH["Оркестратор<br/>(LangGraph)"]
-        AGENTS["6 агентов"]
+    subgraph BEEBOT["beebot (один контейнер, один процесс)"]
+        subgraph TRANSPORT["Транспортный слой (серверный)"]
+            POLLING["aiogram polling<br/>5 роутеров"]
+            FASTAPI["FastAPI :8088<br/>9 веб-роутеров<br/>+ раздача Vue dist/"]
+        end
+
+        subgraph AGENTS["Агенты (тонкие обёртки)"]
+            ORCH["Оркестратор<br/>(LangGraph)"]
+            BEEBOT_A["BeebotAgent"]
+            ANALYST_A["AnalystAgent"]
+            LOGIST_A["LogistAgent"]
+            WORKER_A["WorkerAgent"]
+            ADMIN_A["AdminChatAgent"]
+            INSPECT_A["InspectorAgent"]
+        end
+
+        subgraph SVC_LAYER["Service Layer (бизнес-логика)"]
+            AUTH["AuthService"]
+            ORDER_SVC["OrderService"]
+            CONSULT["ConsultService"]
+            ANALYTICS["AnalyticsService"]
+            DASHBOARD["DashboardService"]
+            WORKER_SVC["WorkerService"]
+            DELIVERY_SVC["DeliveryService"]
+            NOTIFY["NotificationService"]
+        end
+
+        subgraph CROSS["Cross-cutting"]
+            EVENTS["EventEmitter"]
+            BREAKER["CircuitBreaker"]
+            STATE["StateStore"]
+            BG["BackgroundTaskManager"]
+            BUS["EventBus<br/>(Redis Streams)"]
+        end
+
+        STARTUP["startup.py<br/>create_services()"]
     end
 
-    subgraph SVC_LAYER["Service Layer"]
-        AUTH["AuthService"]
-        ORDER_SVC["OrderService"]
-        CONSULT["ConsultService"]
-        ANALYTICS["AnalyticsService"]
-        WORKER_SVC["WorkerService"]
-        DELIVERY_SVC["DeliveryService"]
-        NOTIFY["NotificationService"]
-    end
-
-    subgraph WEB["Веб-панель (Docker)"]
-        API["FastAPI :8088"]
-        VUE["Vue 3 PWA<br/>14 страниц"]
-        BUS["BusHandlers<br/>(Redis Streams)"]
-        BG["BackgroundTaskManager"]
-    end
-
-    subgraph INFRA["Инфраструктура"]
-        CRM_V2[("ai2o.online<br/>CRM v2")]
-        CRM_V1[("ai2o.ru<br/>CRM v1 архив")]
+    subgraph INFRA["Хранилища"]
+        CRM[("CRM<br/>ai2o.online")]
+        REDIS[("Redis :6379")]
         KB["FAISS<br/>276 чанков"]
         LLM["Groq API<br/>llama-3.3-70b"]
-        MEM["SQLite<br/>память"]
+        MEM["SQLite"]
     end
 
-    subgraph EXTERNAL["Внешние системы"]
-        UDS_API["UDS App<br/>(магазин)"]
+    subgraph EXTERNAL["Внешние API"]
+        UDS_API["UDS App"]
         CDEK_A["СДЭК API"]
         POCHTA_A["Почта России"]
     end
 
-    U1 & U2 & U3 --> BOT
-    U4 --> VUE --> API
+    TG_USERS -->|"Telegram API"| POLLING
+    BROWSER -->|"HTTP /api/*"| FASTAPI
+    FASTAPI -->|"раздаёт index.html + assets"| BROWSER
 
-    HANDLERS --> ORCH --> AGENTS
-    AGENTS --> SVC_LAYER
-    API --> SVC_LAYER
-    BUS --> SVC_LAYER
-    SVC_LAYER --> KB & LLM & MEM & CRM_V2
-    SVC_LAYER -.->|"read-only"| CRM_V1
+    STARTUP -->|"создаёт"| AGENTS & SVC_LAYER & CROSS
 
-    UDS_API -->|"polling 5 мин"| BG
-    BG -->|"авто-трекинг 2ч"| CDEK_A & POCHTA_A
+    POLLING --> ORCH --> AGENTS
+    AGENTS -->|"делегируют"| SVC_LAYER
+    FASTAPI -->|"роутеры"| SVC_LAYER
 
+    SVC_LAYER --> CRM & KB & LLM & MEM
+    EVENTS -->|"SSE"| FASTAPI
+    EVENTS --> BUS
+    STATE --> REDIS
+    BUS --> REDIS
+    BREAKER --> CRM
+    BG --> UDS_API & CDEK_A & POCHTA_A
+
+    style BEEBOT fill:#f0f9ff,stroke:#1976d2
     style SVC_LAYER fill:#e8f5e9,stroke:#22c55e
-    style CRM_V2 fill:#bbf7d0,stroke:#22c55e
-    style CRM_V1 fill:#fee2e2,stroke:#ef4444
-    style EXTERNAL fill:#f3e5f5
+    style AGENTS fill:#fff3e0
+    style CROSS fill:#fff8e1,stroke:#f9a825
+    style STARTUP fill:#e3f2fd,stroke:#1976d2
+    style CLIENTS fill:#fef3c7
 ```
+
+**Ключевой принцип: Bot → Service Layer ← Frontend**
+
+Два клиента — Telegram и браузер (Vue PWA). Оба обращаются к серверу, но через разный транспорт:
+
+```
+Telegram-клиент  ──polling──→  aiogram роутеры ──→ Агенты ──→ Service Layer
+                                                                    ↑
+Vue PWA (браузер) ──HTTP/SSE──→ FastAPI роутеры ────────────────────┘
+```
+
+Бот и веб — равноправные клиенты. Вся логика в сервисах. Vue — клиентское приложение в браузере, FastAPI только раздаёт его статику и обрабатывает API-запросы.
 
 ---
 
-## 2. Service Layer: архитектура слоёв
+## 2. Единая инициализация: один процесс
 
 ```mermaid
 graph TB
-    subgraph TRANSPORT["Транспортный слой (вход)"]
-        TG["Telegram<br/>bot.py + 5 роутеров"]
-        WEB_T["FastAPI<br/>api.py + 9 роутеров"]
-        REDIS_BUS["Redis Streams<br/>bus_handlers.py"]
+    ENTRY["src/bot.py<br/>python -m src.bot"]
+
+    STARTUP["src/startup.py<br/>create_services()"]
+
+    subgraph PROCESS["Один процесс (asyncio.gather)"]
+        POLLING["dp.start_polling(bot)<br/>Telegram polling"]
+        UVICORN["uvicorn.Server.serve()<br/>FastAPI :8088"]
     end
 
-    subgraph SERVICES["Service Layer (бизнес-логика)"]
-        AUTH_S["AuthService<br/>роли: admin / worker / beekeeper"]
-        CONSULT_S["ConsultService<br/>KB search → LLM answer"]
-        ORDER_S["OrderService<br/>CRUD + status flow + notify"]
-        ANALYTICS_S["AnalyticsService<br/>10 типов отчётов + LLM classify"]
-        WORKER_S["WorkerService<br/>state + checklist + queue"]
-        DELIVERY_S["DeliveryService<br/>СДЭК / Почта / расчёт"]
-        NOTIFY_S["NotificationService<br/>Telegram push"]
+    subgraph SERVICES["Services (singleton)"]
+        AUTH_S["AuthService"]
+        CRM_S["CRM Client"]
+        ORDER_S["OrderService"]
+        ANALYTICS_S["AnalyticsService"]
+        CONSULT_S["ConsultService"]
+        WORKER_S["WorkerService"]
+        DELIVERY_S["DeliveryService"]
+        DASHBOARD_S["DashboardService"]
+        STATE_S["StateStore"]
+        BG_S["BackgroundTaskManager"]
+    end
+
+    subgraph AGENTS["Агенты (тонкие обёртки)"]
+        ORCH["Orchestrator"]
+        BEEBOT_A["BeebotAgent"]
+        ANALYST_A["AnalystAgent"]
+        LOGIST_A["LogistAgent"]
+        WORKER_A["WorkerAgent"]
+        ADMIN_A["AdminChatAgent"]
+        INSPECT_A["InspectorAgent"]
+    end
+
+    ENTRY -->|"1. create_services()"| STARTUP
+    STARTUP -->|"возвращает"| SERVICES
+    STARTUP -->|"создаёт"| AGENTS
+
+    ENTRY -->|"2. setup_routers(svc)"| AGENTS
+    ENTRY -->|"3. inject_services(svc)"| UVICORN
+    ENTRY -->|"4. asyncio.gather()"| PROCESS
+
+    POLLING -->|"использует"| AGENTS
+    UVICORN -->|"использует"| SERVICES
+
+    style ENTRY fill:#e3f2fd,stroke:#1976d2
+    style STARTUP fill:#e3f2fd,stroke:#1976d2
+    style SERVICES fill:#e8f5e9,stroke:#22c55e
+    style AGENTS fill:#fff3e0
+    style PROCESS fill:#fff8e1,stroke:#f9a825
+```
+
+**Один процесс:** бот и веб-панель делят сервисы в памяти. Нет дублирования FAISS, CRM, fastembed. Экономия ~400 MiB RAM.
+
+---
+
+## 3. Service Layer: архитектура слоёв
+
+```mermaid
+graph TB
+    subgraph TRANSPORT["Транспортный слой"]
+        TG["Telegram polling<br/>bot.py + 5 роутеров"]
+        WEB_T["FastAPI<br/>api.py + 9 роутеров"]
     end
 
     subgraph AGENTS_L["Агенты (тонкие обёртки)"]
         BEEBOT_A["BeebotAgent<br/>→ ConsultService"]
         ANALYST_A["AnalystAgent<br/>→ AnalyticsService"]
-        WORKER_A["worker.py<br/>→ WorkerService + UI"]
+        WORKER_A["worker.py<br/>→ WorkerService"]
         LOGIST_A["LogistAgent<br/>→ OrderService"]
         INSPECT_A["InspectorAgent"]
         ADMIN_A["AdminChatAgent"]
     end
 
-    subgraph INFRA_L["Инфраструктура (выход)"]
-        CRM_I["CRM v1 / v2<br/>(integram_client)"]
-        LLM_I["Groq LLM<br/>(llm_client)"]
-        KB_I["FAISS KB<br/>(knowledge_base)"]
-        DEL_I["СДЭК / Почта<br/>(delivery/)"]
-        MEM_I["SQLite<br/>(memory.py)"]
+    subgraph SERVICES["Service Layer (бизнес-логика)"]
+        AUTH_S["AuthService<br/>роли: admin / worker"]
+        CONSULT_S["ConsultService<br/>KB → LLM"]
+        ORDER_S["OrderService<br/>CRUD + status flow"]
+        ANALYTICS_S["AnalyticsService<br/>10 отчётов"]
+        DASHBOARD_S["DashboardService<br/>stats + charts"]
+        WORKER_S["WorkerService<br/>чеклисты"]
+        DELIVERY_S["DeliveryService<br/>СДЭК / Почта"]
+        NOTIFY_S["NotificationService<br/>Telegram push"]
     end
 
-    TG --> AUTH_S
-    TG --> AGENTS_L
-    WEB_T --> SERVICES
-    REDIS_BUS --> SERVICES
+    subgraph CROSS_S["Cross-cutting"]
+        EVENTS_S["EventEmitter<br/>→ SSE + Redis"]
+        STATE_S["StateStore<br/>→ Redis"]
+        CB_S["CircuitBreaker<br/>→ CRM"]
+        BUS_S["EventBus<br/>→ Redis Streams"]
+    end
 
+    subgraph INFRA_L["Инфраструктура"]
+        CRM_I["Integram CRM"]
+        LLM_I["Groq LLM"]
+        KB_I["FAISS KB"]
+        DEL_I["СДЭК / Почта"]
+        MEM_I["SQLite"]
+    end
+
+    TG --> AGENTS_L
     AGENTS_L --> SERVICES
+    WEB_T --> SERVICES
+
+    SERVICES --> CROSS_S
     SERVICES --> INFRA_L
 
     style TRANSPORT fill:#e3f2fd
-    style SERVICES fill:#e8f5e9,stroke:#22c55e
     style AGENTS_L fill:#fff3e0
+    style SERVICES fill:#e8f5e9,stroke:#22c55e
+    style CROSS_S fill:#fff8e1,stroke:#f9a825
     style INFRA_L fill:#f5f5f5
 ```
 
@@ -130,15 +227,58 @@ graph TB
 |--------|------|-------------|----------------|
 | AuthService | `services/auth_service.py` | config (IDs) | Проверка ролей: admin, worker, beekeeper |
 | ConsultService | `services/consult_service.py` | KB, LLM, TunnelMonitor | Поиск по KB + генерация ответа, FAQ fallback |
-| OrderService | `services/order_service.py` | CRM, NotificationService | CRUD заказов, status flow, валидация |
+| OrderService | `services/order_service.py` | CRM, NotificationService, EventEmitter | CRUD заказов, status flow, валидация, события |
 | AnalyticsService | `services/analytics_service.py` | CRM, Groq | 10 типов отчётов, LLM/keyword classify |
-| WorkerService | `services/worker_service.py` | — (in-memory) | Состояние работника, чеклисты, очередь |
+| DashboardService | `services/dashboard_service.py` | CRM | Статистика, графики, алерты для веб-панели |
+| WorkerService | `services/worker_service.py` | — | Состояние работника, чеклисты, очередь |
 | DeliveryService | `services/delivery_service.py` | Calculator, Tracker | Расчёт доставки, трекинг |
 | NotificationService | `services/notification_service.py` | TelegramSender callback | Push в Telegram: пчеловод, клиент, работники |
+| StateStore | `services/state_store.py` | Redis (fallback in-memory) | Голос улья, admin mode, worker checklists |
+| EventEmitter | `services/event_emitter.py` | EventBus (опц.) | Бизнес-события → SSE + Redis |
+| CircuitBreaker | `services/circuit_breaker.py` | — | Защита от каскадных сбоев CRM |
 
 ---
 
-## 3. Оркестратор: маршрутизация интентов
+## 4. Event-Driven: события и подписчики
+
+```mermaid
+graph LR
+    subgraph WRITE["Команды (запись)"]
+        CREATE["OrderService<br/>.create_order()"]
+        STATUS["OrderService<br/>.update_status()"]
+    end
+
+    EMITTER["EventEmitter<br/>(in-process)"]
+
+    subgraph EVENTS["События"]
+        E1["order.created"]
+        E2["order.status_changed"]
+    end
+
+    subgraph REACT["Подписчики"]
+        SSE["SSE Bridge<br/>→ push в браузер"]
+        CACHE["Cache Invalidator<br/>→ сброс кэша"]
+        REDIS_PUB["Redis Streams<br/>→ персистентность"]
+        TG_NOTIFY["NotificationService<br/>→ Telegram push"]
+    end
+
+    CREATE -->|"events.emit()"| EMITTER
+    STATUS -->|"events.emit()"| EMITTER
+
+    EMITTER --> E1 & E2
+    E1 & E2 --> SSE & CACHE & REDIS_PUB
+    CREATE & STATUS -->|"direct call"| TG_NOTIFY
+
+    style WRITE fill:#e3f2fd
+    style EVENTS fill:#fff3e0
+    style REACT fill:#e8f5e9,stroke:#22c55e
+```
+
+**В одном процессе:** EventEmitter работает через callbacks в памяти (не через Redis). Redis Streams — опциональный, для персистентности и внешних подписчиков.
+
+---
+
+## 5. Оркестратор: маршрутизация интентов
 
 ```mermaid
 flowchart TD
@@ -148,7 +288,7 @@ flowchart TD
     FSM -->|"InspectFSM"| INSPECT_FSM["Шаг диалога осмотра<br/>(inspector.py)"]
     FSM -->|"Нет"| MODE{"Режим?"}
 
-    MODE -->|"WORKER"| WORKER["Очередь сборки<br/>(worker.py)"]
+    MODE -->|"WORKER"| WORKER["Очередь сборки<br/>(worker.py → WorkerService)"]
     MODE -->|"ADMIN /admin"| ADMIN["Ассистент + CRM<br/>(admin_chat.py)"]
     MODE -->|"Обычный"| ORCH["Оркестратор"]
 
@@ -170,64 +310,68 @@ flowchart TD
 
 ---
 
-## 4. Агенты: зависимости и делегирование
+## 6. Circuit Breaker + Health Check
 
 ```mermaid
-graph LR
-    subgraph AGENTS["Агенты (UI + делегирование)"]
-        BEEBOT["Консультант<br/>(beebot.py)"]
-        LOGIST["Логист<br/>(logist.py)"]
-        ANALYST["Аналитик<br/>(analyst.py)"]
-        INSPECTOR["Инспектор<br/>(inspector.py)"]
-        ADMIN_CHAT["Ассистент<br/>(admin_chat.py)"]
-        WORKER_A["Работник<br/>(worker.py)"]
-    end
-
-    subgraph SERVICES["Сервисы"]
-        CS["ConsultService"]
-        AS["AnalyticsService"]
-        OS["OrderService"]
-        WS["WorkerService"]
-    end
-
-    KB["FAISS KB"]
-    LLM["Groq LLM"]
-    CRM["CRM"]
-
-    BEEBOT -->|"делегирует"| CS
-    ANALYST -->|"делегирует"| AS
-    LOGIST -->|"делегирует"| OS
-    WORKER_A -->|"делегирует"| WS
-
-    CS --> KB & LLM
-    AS --> CRM & LLM
-    OS --> CRM
-    WS --> CRM
-    INSPECTOR --> KB & LLM
-    ADMIN_CHAT --> CRM & LLM
-
-    style AGENTS fill:#fff3e0
-    style SERVICES fill:#e8f5e9,stroke:#22c55e
+stateDiagram-v2
+    [*] --> CLOSED : Нормальная работа
+    CLOSED --> OPEN : 5 ошибок подряд
+    OPEN --> HALF_OPEN : timeout (30 сек)
+    HALF_OPEN --> CLOSED : Успешный запрос
+    HALF_OPEN --> OPEN : Ещё ошибка
 ```
 
-### Сравнительная таблица агентов
-
-| Агент | Сервис | KB | CRM | LLM | Вход | Выход |
-|---|---|---|---|---|---|---|
-| Консультант | ConsultService | Чтение | — | Groq | consult | Текст + источники |
-| Логист | OrderService | — | Запись | Groq | order (FSM) | Заказ в CRM |
-| Аналитик | AnalyticsService | — | Чтение | Groq | stats | Отчёт (текст) |
-| Инспектор | — | Чтение | — | Groq | /inspect (FSM) | Рекомендация |
-| Ассистент | — | — | CrmSnapshot | Groq | /admin | Диалог |
-| Работник | WorkerService | — | Чтение+Запись | — | /start (worker) | Кнопки |
+**`/api/health` возвращает:**
+```json
+{
+  "status": "healthy | degraded | unhealthy",
+  "checks": {
+    "crm": {"status": "up"},
+    "order_service": {"status": "up"},
+    "analytics_service": {"status": "up"},
+    "bg_tasks": {"crm_snapshot": {"state": "работает", "uptime_sec": 3600}},
+    "event_bus": {"status": "up"},
+    "crm_circuit_breaker": {"state": "closed", "failures": 0, "threshold": 5}
+  }
+}
+```
 
 ---
 
-## 5. BackgroundTaskManager: фоновые задачи
+## 7. StateStore: Redis для персистентности
+
+```mermaid
+graph TB
+    BEEBOT["beebot<br/>(polling + FastAPI)"]
+
+    subgraph STORE["StateStore"]
+        REDIS_STORE["Redis :6379"]
+        FALLBACK["In-memory<br/>(fallback)"]
+    end
+
+    subgraph KEYS["Redis Keys"]
+        K1["beebot:user_styles<br/>(Hash)"]
+        K2["beebot:admin_mode<br/>(Set)"]
+        K3["beebot:admin_view<br/>(Hash)"]
+        K4["beebot:worker:checklist:*<br/>(Set per order)"]
+    end
+
+    BEEBOT --> STORE
+    STORE --> KEYS
+
+    style STORE fill:#e8f5e9,stroke:#22c55e
+    style KEYS fill:#fff8e1
+```
+
+Redis нужен только для персистентности (данные переживают рестарт). В одном процессе IPC не нужен.
+
+---
+
+## 8. BackgroundTaskManager: фоновые задачи
 
 ```mermaid
 graph LR
-    BG["BackgroundTaskManager<br/>(bg_tasks.py)"]
+    BG["BackgroundTaskManager"]
 
     BG -->|"crm_snapshot"| SNAP["CrmSnapshot<br/>каждые 5 мин"]
     BG -->|"order_tracker"| TRACK["OrderTracker<br/>каждые 2 часа"]
@@ -240,14 +384,11 @@ graph LR
     style BG fill:#e3f2fd,stroke:#1976d2
 ```
 
-**Возможности:**
-- Авто-рестарт при падении (экспоненциальная пауза, макс 60 сек)
-- Мониторинг: `bg.status()` → состояние, uptime, число рестартов
-- Graceful shutdown: `bg.stop_all()` при остановке бота
+Авто-рестарт при падении, мониторинг через `bg.status()`, graceful shutdown через `bg.stop_all()`.
 
 ---
 
-## 6. Жизненный цикл заказа
+## 9. Жизненный цикл заказа
 
 ```mermaid
 stateDiagram-v2
@@ -267,98 +408,56 @@ stateDiagram-v2
 
 ### Источники заказов
 
-| Источник | Как попадает | Уведомления |
-|----------|-------------|-------------|
-| Telegram FSM | LogistAgent → OrderService → CRM | Пчеловод + работники |
+| Источник | Путь | Уведомления |
+|----------|------|-------------|
+| Telegram FSM | LogistAgent → OrderService → CRM → EventEmitter | Пчеловод + работники + SSE |
 | UDS-магазин | UDSPoller → CRM | Пчеловод + работники |
-| Веб-панель | orders.py → CRM | Только пчеловод |
+| Веб-панель | FastAPI → OrderService → CRM → EventEmitter | Пчеловод + SSE |
 
 ---
 
-## 7. CRM: две системы
+## 10. CRM: две системы
 
 ```mermaid
 graph TB
-    subgraph APP["BEEBOT"]
+    subgraph APP["beebot"]
         FF{{"INTEGRAM_V2<br/>feature flag"}}
-        V1_CL["IntegramClient<br/>(v1)"]
-        V2_CL["IntegramV2Client<br/>(v2)"]
+        V1_CL["IntegramClient (v1)"]
+        V2_CL["IntegramV2Client (v2)"]
+        PROXY["_SingletonCrmProxy<br/>close() = no-op"]
     end
 
     subgraph V1["ai2o.ru (АРХИВ)"]
-        V1_DB[("bibot<br/>1924 клиента<br/>1915 заказов<br/>76 товаров")]
+        V1_DB[("bibot<br/>1924 клиента<br/>1915 заказов")]
     end
 
     subgraph V2["ai2o.online (ОСНОВНАЯ)"]
-        V2_DB[("alekseymavai<br/>85 товаров<br/>4 справочника<br/>чистые данные")]
+        V2_DB[("alekseymavai<br/>85 товаров")]
     end
 
     FF -->|"true"| V2_CL --> V2_DB
     FF -->|"false"| V1_CL --> V1_DB
+    V1_CL & V2_CL --> PROXY
 
     style V1 fill:#fee2e2
     style V2 fill:#bbf7d0
     style FF fill:#fef3c7
+    style PROXY fill:#e3f2fd
 ```
 
-### Схема таблиц CRM v2
-
-```mermaid
-erDiagram
-    CATEGORIES["Категории (151)"] ||--o{ PRODUCTS["Товары (581)"] : "группирует"
-    SOURCES["Источники (15)"] ||--o{ CLIENTS["Клиенты (52)"] : "канал"
-    SOURCES ||--o{ ORDERS["Заказы (60)"] : "канал"
-    STATUSES["Статусы (152)"] ||--o{ ORDERS : "текущий"
-    DELIVERY["Доставка (150)"] ||--o{ ORDERS : "способ"
-    CLIENTS ||--o{ ORDERS : "размещает"
-    ORDERS ||--o{ ORDER_ITEMS["Позиции (78)"] : "содержит"
-    PRODUCTS ||--o{ ORDER_ITEMS : "товар"
-
-    PRODUCTS {
-        int id PK
-        string name
-        float price
-        int stock
-        ref category
-    }
-
-    CLIENTS {
-        int id PK
-        string full_name
-        string phone
-        int telegram_id
-        string city
-    }
-
-    ORDERS {
-        int id PK
-        datetime date
-        ref client
-        ref status
-        ref delivery
-        float total
-        string tracking
-    }
-
-    ORDER_ITEMS {
-        int id PK
-        ref order
-        ref product
-        int quantity
-        float price
-    }
-```
+Singleton CRM создаётся один раз в `startup.py`, оборачивается в `_SingletonCrmProxy` (close() — no-op).
 
 ---
 
-## 8. Инфраструктура: туннели и деплой
+## 11. Инфраструктура: один контейнер
 
 ```mermaid
 graph TB
     subgraph VPS["VPS 185.233.200.13"]
-        BOT_C["beebot<br/>~762 MiB"]
-        WEB_C["beebot-web<br/>:8088"]
-        REDIS_C["Redis<br/>:6379"]
+        subgraph DOCKER["Docker Compose"]
+            BOT_C["beebot<br/>python -m src.bot<br/>polling + uvicorn :8088<br/>~762 MiB"]
+            REDIS_C["Redis :6379<br/>~20 MiB"]
+        end
     end
 
     subgraph HIVE["Hive (локальная)"]
@@ -378,76 +477,71 @@ graph TB
 
     BOT_C -->|"SSH tunnel"| GROQ_P --> GROQ_API
     BOT_C -->|"SOCKS5"| SOCKS --> TG_API
-    BOT_C --> REDIS_C --> WEB_C
-    BOT_C & WEB_C --> CRM_V2_C
-    BOT_C -->|"polling 5 мин"| UDS_C
-    WEB_C --> CDEK & POCHTA
+    BOT_C --> REDIS_C
+    BOT_C --> CRM_V2_C
+    BOT_C --> UDS_C & CDEK & POCHTA
 
     style VPS fill:#e3f2fd
     style HIVE fill:#f3e5f5
+    style BOT_C fill:#e8f5e9,stroke:#22c55e
 ```
 
-### Docker-контейнеры
+| Контейнер | Команда | RAM | Порт |
+|-----------|---------|-----|------|
+| redis | redis-server | ~20 MiB | 6379 |
+| beebot | `python -m src.bot` | ~762 MiB | 8088 |
 
-| Контейнер | Образ | RAM | Порт |
-|-----------|-------|-----|------|
-| redis | redis:7-alpine | ~20 MiB | 6379 |
-| beebot | Python 3.12 + FAISS + Groq | ~762 MiB | — |
-| beebot-web | Python 3.12 + Vue dist | ~50 MiB | 8088 |
+Один процесс: polling + uvicorn + 5 фоновых задач в `asyncio.gather()`.
 
 ---
 
-## 9. Файловая структура: четыре слоя
+## 12. Файловая структура: четыре слоя
 
 ```mermaid
 graph TB
-    subgraph TRANSPORT["Транспорт (вход)"]
-        TG["Telegram<br/>bot.py + 5 роутеров"]
-        WEB_T["FastAPI<br/>api.py + 9 роутеров"]
-        REDIS_T["Redis Streams<br/>bus_handlers.py"]
+    subgraph TRANSPORT["1. Транспорт"]
+        TG["bot.py + 5 роутеров<br/>(Telegram)"]
+        WEB_T["api.py + 9 роутеров<br/>(FastAPI)"]
     end
 
-    subgraph SVC["Service Layer"]
-        AUTH_F["auth_service.py"]
-        CONSULT_F["consult_service.py"]
-        ORDER_F["order_service.py"]
-        ANALYTICS_F["analytics_service.py"]
-        WORKER_F["worker_service.py"]
-        DELIVERY_F["delivery_service.py"]
-        NOTIFY_F["notification_service.py"]
-    end
-
-    subgraph AGENTS_F["Агенты (обёртки)"]
+    subgraph AGENTS_F["2. Агенты (обёртки)"]
         BEEBOT_F["beebot.py → ConsultService"]
         ANALYST_F["analyst.py → AnalyticsService"]
-        WORKER_AF["worker.py → WorkerService + UI"]
+        WORKER_AF["worker.py → WorkerService"]
         LOGIST_F["logist.py → OrderService"]
         INSPECT_F["inspector.py"]
         ADMIN_F["admin_chat.py"]
     end
 
-    subgraph INFRA_F["Инфраструктура"]
-        CRM_F["integram_client.py<br/>crm_factory.py"]
-        LLM_F["llm_client.py<br/>tunnel_monitor.py"]
-        KB_F["knowledge_base.py<br/>FAISS + стилометрия"]
-        DEL_F["delivery/<br/>cdek + pochta + calculator"]
-        MEM_F["memory.py<br/>SQLite"]
+    subgraph SVC["3. Service Layer (11 сервисов)"]
+        direction LR
+        S1["auth / consult / order / analytics"]
+        S2["dashboard / worker / delivery / notify"]
+        S3["state_store / event_emitter / circuit_breaker"]
     end
 
-    TRANSPORT --> SVC
-    TRANSPORT --> AGENTS_F
+    subgraph INFRA_F["4. Инфраструктура"]
+        CRM_F["integram_client.py"]
+        LLM_F["llm_client.py"]
+        KB_F["knowledge_base.py"]
+        DEL_F["delivery/"]
+        MEM_F["memory.py"]
+    end
+
+    TG --> AGENTS_F
+    WEB_T --> SVC
     AGENTS_F --> SVC
     SVC --> INFRA_F
 
     style TRANSPORT fill:#e3f2fd
-    style SVC fill:#e8f5e9,stroke:#22c55e
     style AGENTS_F fill:#fff3e0
+    style SVC fill:#e8f5e9,stroke:#22c55e
     style INFRA_F fill:#f5f5f5
 ```
 
 ---
 
-## 10. Поток консультации: пользователь → ответ
+## 13. Поток консультации: пользователь → ответ
 
 ```mermaid
 sequenceDiagram
@@ -476,7 +570,7 @@ sequenceDiagram
 
 ---
 
-## 11. Поток заказа: FSM 7 шагов
+## 14. Поток заказа: FSM → OrderService → Events
 
 ```mermaid
 sequenceDiagram
@@ -486,6 +580,8 @@ sequenceDiagram
     participant Logist as LogistAgent
     participant OS as OrderService
     participant CRM as Integram CRM
+    participant EE as EventEmitter
+    participant SSE as SSE (веб-панель)
 
     User->>Bot: /order
     Bot->>FSM: start
@@ -503,23 +599,26 @@ sequenceDiagram
     Logist->>OS: create_order()
     OS->>CRM: create_order()
     OS->>OS: notify (пчеловод + работники)
+    OS->>EE: emit("order.created", {...})
+    EE->>SSE: push_event() → браузер обновляется
+    EE->>EE: invalidate_orders_cache()
     Bot-->>User: "Заказ #TG-20260402 создан!"
 ```
 
 ---
 
-## 12. UDS-синхронизация: магазин → CRM
+## 15. UDS-синхронизация: магазин → CRM
 
 ```mermaid
 sequenceDiagram
     participant UDS as UDS Partner API
-    participant Poller as UDSPoller<br/>(каждые 5 мин)
+    participant Poller as UDSPoller (каждые 5 мин)
     participant Dedup as TransactionDeduplicator
     participant CRM as Integram CRM
     participant Bot as Telegram-бот
     participant Admin as Пчеловод
 
-    Note over Poller: Старт бота
+    Note over Poller: Старт
     Poller->>CRM: get_orders() — загрузить UDS-* заказы
     CRM-->>Dedup: {UDS-001, UDS-002, ...}
 
@@ -544,24 +643,14 @@ sequenceDiagram
         alt Новая
             Poller->>CRM: sync_uds_transaction()
             Poller->>Bot: уведомление
-            Bot->>Admin: 🛒 Новый заказ из UDS
+            Bot->>Admin: Новый заказ из UDS
         end
     end
 ```
 
-### Компоненты UDS-интеграции
-
-| Компонент | Файл | Назначение |
-|-----------|------|-----------|
-| UDSClient | src/integrations/uds.py | REST-клиент UDS Partner API v2 (Basic Auth, retry 3×) |
-| UDSPoller | src/integrations/uds.py | Фоновый polling + catch-up + дедупликация |
-| TransactionDeduplicator | src/integrations/uds.py | Хранит обработанные ID, загружает из CRM при старте |
-| sync_uds_transaction() | src/integrations/uds.py | Транзакция → клиент → товары по SKU → заказ → уведомление |
-| sync_uds_catalog() | src/integrations/uds.py | Сопоставление каталога UDS ↔ Integram по артикулу |
-
 ---
 
-## 13. Голос Улья: 5 стилей
+## 16. Голос Улья: 5 стилей
 
 | Стиль | Описание | Когда использовать |
 |-------|---------|-------------------|

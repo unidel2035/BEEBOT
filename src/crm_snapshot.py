@@ -58,25 +58,22 @@ class CrmSnapshot:
         """Загрузить полный снимок: заказы + позиции + клиенты + товары."""
         logger.info("CRM snapshot: обновление...")
 
-        # Заказы и позиции — 2 параллельных запроса
-        results = await asyncio.gather(
-            self._crm.get_orders(),
-            self._crm.get_order_items_bulk(),
-            return_exceptions=True,
-        )
-        orders, all_items = results
-
-        if isinstance(orders, BaseException):
-            logger.error("CRM snapshot: ошибка загрузки заказов: %s", orders)
+        # Заказы — сначала (нужны ID для загрузки позиций)
+        try:
+            orders = await self._crm.get_orders()
+        except Exception as e:
+            logger.error("CRM snapshot: ошибка загрузки заказов: %s", e)
             return
 
-        # Группируем позиции по order_id → быстрый поиск O(1)
+        # Позиции — только для загруженных заказов
+        order_id_set = {o.id for o in orders}
         items_by_order: dict[int, list] = {}
-        if not isinstance(all_items, BaseException):
+        try:
+            all_items = await self._crm.get_order_items_bulk(order_ids=order_id_set)
             for item in all_items:
                 items_by_order.setdefault(item.order_id, []).append(item)
-        else:
-            logger.warning("CRM snapshot: позиции недоступны: %s", all_items)
+        except Exception as e:
+            logger.warning("CRM snapshot: позиции недоступны: %s", e)
 
         # Наполняем каждый заказ позициями
         for order in orders:

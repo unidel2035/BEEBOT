@@ -352,7 +352,10 @@ async def get_items_cache(crm: "IntegramClient") -> dict[int, list]:
                 import logging
                 _log = logging.getLogger(__name__)
                 _log.info("Загрузка кеша позиций заказов (TTL истёк)...")
-                all_items = await crm.get_order_items_bulk()
+                # Загружаем только позиции для заказов из кеша заказов
+                orders_list = await get_orders_cache(crm)
+                order_id_set = {o.id for o in orders_list} if orders_list else None
+                all_items = await crm.get_order_items_bulk(order_ids=order_id_set)
                 cache: dict[int, list] = {}
                 for item in all_items:
                     cache.setdefault(item.order_id, []).append(item)

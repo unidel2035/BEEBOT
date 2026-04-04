@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time as _time
 from datetime import datetime
@@ -351,29 +352,91 @@ class IntegramV2Client:
     # Заказы
     # ------------------------------------------------------------------
 
+    async def _fetch_all_order_ids_rest(self, last_n_pages: int = 0) -> list[int]:
+        """Получить ID всех заказов через REST-пагинацию.
+
+        last_n_pages=0 → все страницы; last_n_pages>0 → только последние N страниц.
+        Возвращает список ID в порядке возрастания (старые → новые).
+        """
+        await self._ensure_auth()
+        # Первый запрос — получить мета (кол-во страниц)
+        resp = await self._client.get(
+            f"{self._base_url}/api/v2/{self._workspace}/objects",
+            params={"typeId": TABLE_ORDERS, "max": 50, "page": 1},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        first = resp.json()
+        meta = first.get("meta", {})
+        total_pages = meta.get("totalPages", 1)
+
+        start_page = 1 if last_n_pages == 0 else max(1, total_pages - last_n_pages + 1)
+        pages_to_fetch = list(range(start_page, total_pages + 1))
+
+        async def _fetch_page(page: int) -> list[int]:
+            r = await self._client.get(
+                f"{self._base_url}/api/v2/{self._workspace}/objects",
+                params={"typeId": TABLE_ORDERS, "max": 50, "page": page},
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+            return [row["id"] for row in r.json().get("data", []) if row.get("id")]
+
+        # Первая страница уже получена
+        ids: list[int] = [row["id"] for row in first.get("data", []) if row.get("id")]
+        if pages_to_fetch[0] == 1:
+            pages_to_fetch = pages_to_fetch[1:]  # не дублируем страницу 1
+
+        # Параллельная загрузка остальных страниц (батчи по 20)
+        for i in range(0, len(pages_to_fetch), 20):
+            batch = pages_to_fetch[i:i + 20]
+            results = await asyncio.gather(*[_fetch_page(p) for p in batch])
+            for page_ids in results:
+                ids.extend(page_ids)
+        return ids
+
     async def get_orders(
         self,
         client_id: Optional[int] = None,
         status: Optional[str] = None,
     ) -> list[Order]:
-        """Получить список заказов."""
-        data = await self._call_tool("list_objects", {"typeId": TABLE_ORDERS, "limit": 5000})
-        orders = []
-        for row in data.get("rows", []):
-            order = self._row_to_order(row)
-            if client_id is not None and order.client_id != client_id:
-                continue
-            if status is not None and order.status != status:
-                continue
-            orders.append(order)
+        """Получить список заказов через REST-пагинацию + parallel objId fetch.
+
+        Загружает все ID через REST, затем параллельно получает поля через AI tool.
+        """
+        # Загружаем последние 10 страниц (500 последних заказов)
+        # После очистки дублей можно увеличить или убрать лимит
+        all_ids = await self._fetch_all_order_ids_rest(last_n_pages=10)
+
+        # Параллельная загрузка данных заказов батчами по 20
+        orders: list[Order] = []
+        for i in range(0, len(all_ids), 20):
+            batch = all_ids[i:i + 20]
+            results = await asyncio.gather(*[self._fetch_order_by_id(oid) for oid in batch])
+            for order in results:
+                if order is None:
+                    continue
+                if client_id is not None and order.client_id != client_id:
+                    continue
+                if status is not None and order.status != status:
+                    continue
+                orders.append(order)
         return orders
 
     async def get_order(self, order_id: int) -> Order:
         """Получить заказ по ID."""
-        data = await self._call_tool("get_object", {"objectId": order_id, "typeId": TABLE_ORDERS})
-        if not data:
+        data = await self._call_tool("get_object", {"objId": order_id})
+        if not data or data.get("error"):
             raise IntegramV2NotFoundError(f"Заказ {order_id} не найден.")
         return self._row_to_order(data)
+
+    async def _fetch_order_by_id(self, order_id: int) -> Optional[Order]:
+        """Получить заказ по ID через objId (возвращает None при ошибке)."""
+        try:
+            data = await self._call_tool("get_object", {"objId": order_id})
+            if not data or data.get("error") or data.get("typeId") != TABLE_ORDERS:
+                return None
+            return self._row_to_order(data)
+        except Exception:
+            return None
 
     async def create_order(
         self,
@@ -489,28 +552,45 @@ class IntegramV2Client:
     async def _fetch_item_parent_map(self) -> dict[int, int]:
         """REST-список всех позиций → {item_id: order_id}.
 
-        REST endpoint быстро возвращает id+parentId без реквизитов.
-        Orphaned items (parentId=1 от сломанного синка) исключаются.
+        REST endpoint возвращает id+parentId без реквизитов.
+        Использует page-пагинацию (offset не поддерживается).
+        Orphaned items (parentId=1) исключаются.
         """
         await self._ensure_auth()
         parent_map: dict[int, int] = {}
-        offset = 0
-        while True:
-            resp = await self._client.get(
-                f"{self._base_url}/api/v2/{self._workspace}/objects",
-                params={"typeId": TABLE_ORDER_ITEMS, "max": 500, "offset": offset},
-                headers={"Authorization": f"Bearer {self._token}"},
-            )
-            data = resp.json()
-            rows = data.get("data") or data.get("rows") or []
+
+        def _parse_page(rows: list) -> None:
             for row in rows:
                 rid = row.get("id")
                 pid = row.get("parentId", 1)
                 if rid and pid and pid != 1:
                     parent_map[rid] = pid
-            if len(rows) < 500:
-                break
-            offset += len(rows)
+
+        # Первая страница + мета
+        resp = await self._client.get(
+            f"{self._base_url}/api/v2/{self._workspace}/objects",
+            params={"typeId": TABLE_ORDER_ITEMS, "max": 50, "page": 1},
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        first = resp.json()
+        _parse_page(first.get("data") or [])
+        total_pages = first.get("meta", {}).get("totalPages", 1)
+
+        async def _fetch_page(page: int) -> list:
+            r = await self._client.get(
+                f"{self._base_url}/api/v2/{self._workspace}/objects",
+                params={"typeId": TABLE_ORDER_ITEMS, "max": 50, "page": page},
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+            return r.json().get("data") or []
+
+        # Параллельная загрузка остальных страниц (батчи по 30)
+        for i in range(0, total_pages - 1, 30):
+            batch_pages = list(range(2 + i, min(2 + i + 30, total_pages + 1)))
+            results = await asyncio.gather(*[_fetch_page(p) for p in batch_pages])
+            for rows in results:
+                _parse_page(rows)
+
         return parent_map
 
     async def get_order_items(self, order_id: int) -> list[OrderItem]:
@@ -534,22 +614,49 @@ class IntegramV2Client:
             if row.get("id") in target_ids
         ]
 
-    async def get_order_items_bulk(self) -> list[OrderItem]:
-        """Получить ВСЕ позиции (поля из AI tool + parentId из REST)."""
+    async def get_order_items_bulk(
+        self, order_ids: Optional[set] = None,
+    ) -> list[OrderItem]:
+        """Получить позиции заказов (parentId из REST + поля через objId).
+
+        order_ids — если указан, загружает только позиции этих заказов.
+        Без фильтра загружает ВСЕ позиции (может быть долго при большом объёме).
+        """
         parent_map = await self._fetch_item_parent_map()
-        data = await self._call_tool("list_objects", {"typeId": TABLE_ORDER_ITEMS, "limit": 10000})
-        return [
-            OrderItem(
-                id=row["id"],
-                order_id=parent_map.get(row.get("id"), 0),
-                product_id=_extract_ref_id(row.get("Товар")) or 0,
-                product_name=_extract_ref_name(row.get("Товар")),
-                quantity=int(_parse_float(row.get("Количество")) or 1),
-                unit_price=_parse_float(row.get("Цена за единицу")) or 0,
-                total=_parse_float(row.get("Сумма")) or 0,
-            )
-            for row in data.get("rows", [])
-        ]
+
+        # Фильтруем item_ids по нужным заказам
+        if order_ids is not None:
+            target_item_ids = [iid for iid, oid in parent_map.items() if oid in order_ids]
+        else:
+            target_item_ids = list(parent_map.keys())
+
+        if not target_item_ids:
+            return []
+
+        # Параллельная загрузка полей через objId (батчи по 20)
+        async def _fetch_item(item_id: int) -> Optional[OrderItem]:
+            try:
+                data = await self._call_tool("get_object", {"objId": item_id})
+                if not data or data.get("error"):
+                    return None
+                return OrderItem(
+                    id=item_id,
+                    order_id=parent_map.get(item_id, 0),
+                    product_id=_extract_ref_id(data.get("Товар")) or 0,
+                    product_name=_extract_ref_name(data.get("Товар")),
+                    quantity=int(_parse_float(data.get("Количество")) or 1),
+                    unit_price=_parse_float(data.get("Цена за единицу")) or 0,
+                    total=_parse_float(data.get("Сумма")) or 0,
+                )
+            except Exception:
+                return None
+
+        items: list[OrderItem] = []
+        for i in range(0, len(target_item_ids), 20):
+            batch = target_item_ids[i:i + 20]
+            results = await asyncio.gather(*[_fetch_item(iid) for iid in batch])
+            items.extend(it for it in results if it is not None)
+        return items
 
     async def add_order_item(
         self, order_id: int, product_id: int, qty: int, price: float,

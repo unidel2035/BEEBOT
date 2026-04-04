@@ -42,5 +42,9 @@ def mock_fastembed(request):
         yield
         return
 
-    with patch("src.knowledge_base.TextEmbedding", return_value=_make_fake_text_embedding()):
+    try:
+        with patch("src.knowledge_base.TextEmbedding", return_value=_make_fake_text_embedding()):
+            yield
+    except (ImportError, AttributeError, ModuleNotFoundError):
+        # knowledge_base недоступна (нет faiss/fastembed в dev-окружении) — тест работает без патча
         yield

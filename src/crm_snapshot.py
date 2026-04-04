@@ -65,7 +65,25 @@ class CrmSnapshot:
             logger.error("CRM snapshot: ошибка загрузки заказов: %s", e)
             return
 
-        # Позиции — только для загруженных заказов
+        # Клиенты и товары — ДО позиций (быстро, пока auth свежий после загрузки заказов)
+        try:
+            clients, products = await asyncio.gather(
+                self._crm.get_clients(),
+                self._crm.get_products(),
+                return_exceptions=True,
+            )
+            if not isinstance(clients, BaseException):
+                self.clients = clients
+            else:
+                logger.warning("CRM snapshot: клиенты недоступны: %s", clients)
+            if not isinstance(products, BaseException):
+                self.products = products
+            else:
+                logger.warning("CRM snapshot: товары недоступны: %s", products)
+        except Exception as e:
+            logger.warning("CRM snapshot: клиенты/товары недоступны: %s", e)
+
+        # Позиции — только для загруженных заказов (может быть медленно/нестабильно)
         order_id_set = {o.id for o in orders}
         items_by_order: dict[int, list] = {}
         try:
@@ -80,20 +98,6 @@ class CrmSnapshot:
             order.items = items_by_order.get(order.id, [])
 
         self.orders = orders
-
-        # Клиенты и товары параллельно (некритично — не останавливаем если упадут)
-        try:
-            clients, products = await asyncio.gather(
-                self._crm.get_clients(),
-                self._crm.get_products(),
-                return_exceptions=True,
-            )
-            if not isinstance(clients, BaseException):
-                self.clients = clients
-            if not isinstance(products, BaseException):
-                self.products = products
-        except Exception as e:
-            logger.warning("CRM snapshot: клиенты/товары недоступны: %s", e)
 
         self.updated_at = datetime.now()
         total_items = sum(len(o.items) for o in self.orders)

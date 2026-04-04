@@ -154,6 +154,11 @@ class IntegramV2Client:
                     json={"name": name, "args": args, "skipHitl": True},
                     headers={"Authorization": f"Bearer {self._token}"},
                 )
+                if not resp.content:
+                    last_err = f"HTTP {resp.status_code}: пустой ответ"
+                    if attempt < retries - 1:
+                        await _async_sleep(2 ** attempt)
+                    continue
                 data = resp.json()
                 if data.get("ok"):
                     return data.get("data", data)
@@ -677,7 +682,17 @@ class IntegramV2Client:
             params={"typeId": TABLE_ORDER_ITEMS, "max": 50, "page": 1},
             headers={"Authorization": f"Bearer {self._token}"},
         )
-        first = resp.json()
+        if not resp.content:
+            logger.warning(
+                "_fetch_item_parent_map: HTTP %d пустой ответ на стр.1 — пропуск",
+                resp.status_code,
+            )
+            return parent_map
+        try:
+            first = resp.json()
+        except Exception as exc:
+            logger.warning("_fetch_item_parent_map: невалидный JSON на стр.1 — пропуск: %s", exc)
+            return parent_map
         total_pages = first.get("meta", {}).get("totalPages", 1)
 
         # Определяем диапазон страниц (только последние last_n_pages)

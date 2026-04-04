@@ -402,18 +402,21 @@ class IntegramV2Client:
         obj_id = result["id"]
         logger.info("Создан заказ '%s' (id=%d). Итого: %.0f ₽", number, obj_id, total)
 
-        # Создать позиции
+        # Создать позиции (parentId связывает с заказом — child table)
         for item_data in items:
             qty = item_data.get("quantity", 1)
             price = item_data.get("unit_price", 0)
             item_fields = {
-                "Заказ": obj_id,
                 "Товар": item_data["product_id"],
                 "Количество": qty,
-                "Цена за шт.": price,
+                "Цена за единицу": price,
                 "Сумма": qty * price,
             }
-            await self._call_tool("create_object", {"typeId": TABLE_ORDER_ITEMS, "fields": item_fields})
+            await self._call_tool("create_object", {
+                "typeId": TABLE_ORDER_ITEMS,
+                "parentId": obj_id,
+                "fields": item_fields,
+            })
 
         return Order(
             id=obj_id, number=number, client_id=client_id, date=datetime.now(),
@@ -471,35 +474,36 @@ class IntegramV2Client:
             logger.info("Заказ %d обновлён: %s", order_id, list(kwargs.keys()))
 
     async def get_order_items(self, order_id: int) -> list[OrderItem]:
-        """Получить позиции заказа."""
-        data = await self._call_tool("list_objects", {"typeId": TABLE_ORDER_ITEMS, "limit": 5000})
-        items = []
-        for row in data.get("rows", []):
-            ref_order = _extract_ref_id(row.get("Заказ"))
-            if ref_order != order_id:
-                continue
-            items.append(OrderItem(
+        """Получить позиции заказа (child table, фильтр по parentId)."""
+        data = await self._call_tool("list_objects", {
+            "typeId": TABLE_ORDER_ITEMS,
+            "parentId": order_id,
+            "limit": 100,
+        })
+        return [
+            OrderItem(
                 id=row["id"],
                 order_id=order_id,
                 product_id=_extract_ref_id(row.get("Товар")) or 0,
                 product_name=_extract_ref_name(row.get("Товар")),
                 quantity=int(_parse_float(row.get("Количество")) or 1),
-                unit_price=_parse_float(row.get("Цена за шт.")) or 0,
+                unit_price=_parse_float(row.get("Цена за единицу")) or 0,
                 total=_parse_float(row.get("Сумма")) or 0,
-            ))
-        return items
+            )
+            for row in data.get("rows", [])
+        ]
 
     async def get_order_items_bulk(self) -> list[OrderItem]:
-        """Получить ВСЕ позиции заказов."""
+        """Получить ВСЕ позиции заказов (без фильтра по parentId)."""
         data = await self._call_tool("list_objects", {"typeId": TABLE_ORDER_ITEMS, "limit": 10000})
         return [
             OrderItem(
                 id=row["id"],
-                order_id=_extract_ref_id(row.get("Заказ")) or 0,
+                order_id=row.get("parentId") or 0,
                 product_id=_extract_ref_id(row.get("Товар")) or 0,
                 product_name=_extract_ref_name(row.get("Товар")),
                 quantity=int(_parse_float(row.get("Количество")) or 1),
-                unit_price=_parse_float(row.get("Цена за шт.")) or 0,
+                unit_price=_parse_float(row.get("Цена за единицу")) or 0,
                 total=_parse_float(row.get("Сумма")) or 0,
             )
             for row in data.get("rows", [])
@@ -510,13 +514,16 @@ class IntegramV2Client:
     ) -> int:
         """Добавить позицию к заказу."""
         fields = {
-            "Заказ": order_id,
             "Товар": product_id,
             "Количество": qty,
-            "Цена за шт.": int(price),
+            "Цена за единицу": int(price),
             "Сумма": int(qty * price),
         }
-        result = await self._call_tool("create_object", {"typeId": TABLE_ORDER_ITEMS, "fields": fields})
+        result = await self._call_tool("create_object", {
+            "typeId": TABLE_ORDER_ITEMS,
+            "parentId": order_id,
+            "fields": fields,
+        })
         return result["id"]
 
     async def recalculate_order_totals(self, order_id: int) -> dict:
@@ -549,7 +556,7 @@ class IntegramV2Client:
         if qty is not None:
             fields["Количество"] = qty
         if price is not None:
-            fields["Цена за шт."] = int(price)
+            fields["Цена за единицу"] = int(price)
         if qty is not None and price is not None:
             fields["Сумма"] = int(qty * price)
         if fields:

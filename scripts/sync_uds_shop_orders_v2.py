@@ -67,37 +67,17 @@ REQ_PRODUCT_INSTOCK = "2183"
 REQ_CLIENT_PHONE  = "2188"
 REQ_CLIENT_SOURCE = "2194"
 
-# Реквизиты заказов
-REQ_ORDER_NUMBER        = "2195"
-REQ_ORDER_DATE          = "2196"
-REQ_ORDER_CLIENT        = "2197"
-REQ_ORDER_SOURCE        = "2198"
-REQ_ORDER_STATUS        = "21391"  # chip → TABLE_STATUS_CHIPS (21383)
-REQ_ORDER_DELIVERY      = "2200"
-REQ_ORDER_ADDRESS       = "2201"
-REQ_ORDER_TRACKING      = "2202"
-REQ_ORDER_ITEMS_TOTAL   = "2203"
-REQ_ORDER_DELIVERY_COST = "2204"
-REQ_ORDER_TOTAL         = "2205"
-REQ_ORDER_COMMENT       = "2206"
+# Источники (таблица 15)
+SOURCE_UDS = 21  # int — REF в AI tool передаётся как число
 
-# Реквизиты позиций
-REQ_ITEM_ORDER   = "2207"
-REQ_ITEM_PRODUCT = "2208"
-REQ_ITEM_QTY     = "2209"
-REQ_ITEM_PRICE   = "2210"
-REQ_ITEM_SUM     = "2211"
-REQ_ITEM_UDS_ID  = "39181"   # UDS internal product ID
-
-# Lookup IDs (записи в справочниках — shared между v1/v2)
-SOURCE_UDS      = "21"
+# Статусы заказов (таблица 152) — точные ID записей
 STATUS_MAP = {
-    "COMPLETED":       "21406",  # Доставлен
-    "CANCELLED":       "21408",  # Отменён
-    "ACCEPTED":        "21387",  # Подтверждён
-    "NEW":             "21385",  # Новый
-    "NEED_ACK":        "21385",
-    "WAITING_PAYMENT": "21385",
+    "COMPLETED":       187,  # Доставлен
+    "CANCELLED":       189,  # Отменён
+    "ACCEPTED":        181,  # Подтверждён
+    "NEW":             179,  # Новый
+    "NEED_ACK":        179,
+    "WAITING_PAYMENT": 179,
 }
 DELIVERY_MAP = {
     "СДЭК":          "191",
@@ -127,40 +107,56 @@ class V2Client:
         logger.info("Integram v2: токен обновлён")
 
     async def list_objects(self, type_id: int) -> list[dict]:
-        """Загрузить все объекты через page-based пагинацию (v2 API: page/pageSize)."""
+        """Загрузить объекты через AI tool endpoint (поддерживает до 5000 записей)."""
+        import asyncio as _asyncio
         all_items: list[dict] = []
-        page = 1
-        page_size = 50
-        while True:
-            r = await self._http.get(f"{self._base}/objects",
-                params={"typeId": type_id, "page": page, "pageSize": page_size},
+        seen_ids: set[int] = set()
+        # Используем несколько сортировок для обхода лимита 100 на вызов
+        sorts = ["id", "-id", "name", "-name", "createdAt", "-createdAt"]
+        for sort in sorts:
+            r = await self._http.post(
+                f"{self._base}/ai/tool",
+                json={"name": "list_objects", "args": {"typeId": type_id, "limit": 500, "sort": sort}, "skipHitl": True},
                 headers=self._hdrs)
             d = r.json()
-            batch = d.get("data", [])
-            all_items.extend(batch)
-            meta = d.get("meta", {})
-            total_pages = meta.get("totalPages", 1)
-            if page >= total_pages:
-                break
-            page += 1
+            rows = (d.get("data") or {}).get("rows") or []
+            new_count = 0
+            for row in rows:
+                rid = row.get("id")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    all_items.append(row)
+                    new_count += 1
+            logger.info("sort=%-12s +%d новых, итого %d", sort, new_count, len(all_items))
+            await _asyncio.sleep(0.5)
         return all_items
 
-    async def create_object(self, type_id: int, value: str, requisites: dict) -> int:
-        r = await self._http.post(f"{self._base}/objects",
-            json={"typeId": type_id, "value": value, "requisites": requisites},
+    async def _call_tool(self, name: str, args: dict) -> dict:
+        """Вызвать AI tool endpoint (retry при AUTH_REQUIRED)."""
+        r = await self._http.post(f"{self._base}/ai/tool",
+            json={"name": name, "args": args, "skipHitl": True},
             headers=self._hdrs)
         d = r.json()
         if not d.get("ok"):
             err = d.get("error", {})
             if err.get("code") == "AUTH_REQUIRED":
                 await self._reauth()
-                r = await self._http.post(f"{self._base}/objects",
-                    json={"typeId": type_id, "value": value, "requisites": requisites},
+                r = await self._http.post(f"{self._base}/ai/tool",
+                    json={"name": name, "args": args, "skipHitl": True},
                     headers=self._hdrs)
                 d = r.json()
         if not d.get("ok"):
-            raise RuntimeError(f"create_object failed: {d}")
-        return d["data"]["id"]
+            raise RuntimeError(f"Tool '{name}' failed: {d}")
+        return d.get("data", {})
+
+    async def create_object(self, type_id: int, name: str, fields: dict,
+                            parent_id: int | None = None) -> int:
+        """Создать объект через AI tool. Для дочерних таблиц передавать parent_id."""
+        args: dict = {"typeId": type_id, "fields": fields}
+        if parent_id:
+            args["parentId"] = parent_id
+        data = await self._call_tool("create_object", args)
+        return data["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -250,11 +246,11 @@ async def get_or_create_client(v2: V2Client, parsed: dict, client_cache: dict) -
     if key and key in client_cache:
         return client_cache[key]
 
-    reqs = {REQ_CLIENT_SOURCE: SOURCE_UDS}
+    fields: dict = {"Источник": SOURCE_UDS}
     if phone:
-        reqs[REQ_CLIENT_PHONE] = phone
+        fields["Телефон"] = phone
 
-    obj_id = await v2.create_object(TABLE_CLIENTS, name, reqs)
+    obj_id = await v2.create_object(TABLE_CLIENTS, name, fields)
     logger.info("Создан клиент '%s' id=%d", name, obj_id)
     if key:
         client_cache[key] = obj_id
@@ -302,7 +298,7 @@ async def sync_order(v2: V2Client, parsed: dict, client_cache: dict,
         except ValueError:
             pass
 
-    status_id = STATUS_MAP.get(parsed["state"], "21385")  # дефолт: Новый
+    status_id = STATUS_MAP.get(parsed["state"], 179)  # дефолт: Новый
     delivery_id = next((v for k, v in DELIVERY_MAP.items()
                         if k.lower() in parsed["delivery_name"].lower()), "")
 
@@ -317,39 +313,39 @@ async def sync_order(v2: V2Client, parsed: dict, client_cache: dict,
 
     client_id = await get_or_create_client(v2, parsed, client_cache)
 
-    order_reqs: dict = {
-        REQ_ORDER_NUMBER: order_number,
-        REQ_ORDER_DATE: order_date.strftime("%Y-%m-%d"),
-        REQ_ORDER_CLIENT: str(client_id),
-        REQ_ORDER_SOURCE: SOURCE_UDS,
-        REQ_ORDER_STATUS: status_id,
-        REQ_ORDER_TOTAL: str(int(parsed["total"])),
+    order_fields: dict = {
+        "Номер": order_number,
+        "Дата": order_date.strftime("%Y-%m-%d"),
+        "Клиент": client_id,
+        "Источник": SOURCE_UDS,
+        "Статус": status_id,
+        "Итого": int(parsed["total"]),
     }
     if parsed["items_total"]:
-        order_reqs[REQ_ORDER_ITEMS_TOTAL] = str(int(parsed["items_total"]))
+        order_fields["Сумма товаров"] = int(parsed["items_total"])
     if parsed["delivery_cost"]:
-        order_reqs[REQ_ORDER_DELIVERY_COST] = str(int(parsed["delivery_cost"]))
+        order_fields["Стоимость доставки"] = int(parsed["delivery_cost"])
     if parsed["address"]:
-        order_reqs[REQ_ORDER_ADDRESS] = parsed["address"]
+        order_fields["Адрес доставки"] = parsed["address"]
     if delivery_id:
-        order_reqs[REQ_ORDER_DELIVERY] = delivery_id
+        order_fields["Способ доставки"] = int(delivery_id)
     if parsed["comment"]:
-        order_reqs[REQ_ORDER_COMMENT] = parsed["comment"]
+        order_fields["Комментарий"] = parsed["comment"]
 
-    order_id = await v2.create_object(TABLE_ORDERS, order_number, order_reqs)
+    order_id = await v2.create_object(TABLE_ORDERS, order_number, order_fields)
 
     for item in items:
-        item_reqs = {
-            REQ_ITEM_ORDER: str(order_id),
-            REQ_ITEM_QTY: str(item["qty"]),
-            REQ_ITEM_PRICE: str(int(item["price"])),
-            REQ_ITEM_SUM: str(int(item["qty"] * item["price"])),
+        item_fields: dict = {
+            "Количество": item["qty"],
+            "Цена за единицу": int(item["price"]),
+            "Сумма": int(item["qty"] * item["price"]),
         }
         if item["product_id"]:
-            item_reqs[REQ_ITEM_PRODUCT] = str(item["product_id"])
+            item_fields["Товар"] = item["product_id"]
         if item.get("uds_product_id"):
-            item_reqs[REQ_ITEM_UDS_ID] = str(item["uds_product_id"])
-        await v2.create_object(TABLE_ORDER_ITEMS, item["name"], item_reqs)
+            item_fields["UDS ID товара"] = str(item["uds_product_id"])
+        # parent_id связывает позицию с заказом (child table)
+        await v2.create_object(TABLE_ORDER_ITEMS, item["name"], item_fields, parent_id=order_id)
 
     existing_numbers.add(order_number)
     logger.info("✅ %s | %s | %.0f₽ | %d позиций",
@@ -374,7 +370,8 @@ async def main(args: argparse.Namespace) -> None:
 
     uds = UDSClient(token=token)
 
-    async with httpx.AsyncClient(timeout=30) as http:
+    limits = httpx.Limits(max_keepalive_connections=0, max_connections=10)
+    async with httpx.AsyncClient(timeout=120, limits=limits) as http:
         # Авторизация v2
         r = await http.post(f"{V2_URL}/api/v2/iam/login",
             json={"email": V2_EMAIL, "password": V2_PASSWORD})
@@ -382,13 +379,13 @@ async def main(args: argparse.Namespace) -> None:
         v2 = V2Client(http, v2_token)
         logger.info("Integram v2 авторизация OK")
 
-        # Загрузить уже существующие заказы
+        # Загрузить уже существующие заказы (AI tool возвращает поля по алиасам)
         logger.info("Загрузка существующих заказов из v2...")
         existing_objs = await v2.list_objects(TABLE_ORDERS)
         existing_numbers = set()
         for obj in existing_objs:
-            reqs = obj.get("requisites", {})
-            num = reqs.get(REQ_ORDER_NUMBER) or obj.get("value", "")
+            # AI tool: поле "Номер" или "name" (display value)
+            num = obj.get("Номер") or obj.get("name", "")
             if num.startswith(ORDER_NUMBER_PREFIX):
                 existing_numbers.add(num)
         logger.info("Уже в v2: %d UDS-SHOP заказов", len(existing_numbers))
@@ -396,12 +393,12 @@ async def main(args: argparse.Namespace) -> None:
         # Загрузить каталог товаров v2 (name → id)
         logger.info("Загрузка каталога товаров v2...")
         prod_objs = await v2.list_objects(TABLE_PRODUCTS)
-        name_map = {obj["value"].lower().strip(): obj["id"]
-                    for obj in prod_objs if obj.get("value")}
-        # Точный маппинг UDS product ID → v2 product ID (из поля REQ_ITEM_UDS_ID в каталоге)
+        name_map = {(obj.get("Название") or obj.get("name", "")).lower().strip(): obj["id"]
+                    for obj in prod_objs if obj.get("id")}
+        # Точный маппинг: "Артикул UDS" → v2 product ID
         uds_id_map: dict[int, int] = {}
         for obj in prod_objs:
-            sku = (obj.get("requisites") or {}).get(REQ_ITEM_UDS_ID)
+            sku = obj.get("Артикул UDS") or obj.get("Артикул")
             if sku:
                 try:
                     uds_id_map[int(sku)] = obj["id"]
@@ -414,7 +411,7 @@ async def main(args: argparse.Namespace) -> None:
         client_objs = await v2.list_objects(TABLE_CLIENTS)
         client_cache: dict[str, int] = {}
         for obj in client_objs:
-            phone = (obj.get("requisites") or {}).get(REQ_CLIENT_PHONE, "")
+            phone = obj.get("Телефон", "")
             key = "".join(c for c in phone if c.isdigit())
             if key:
                 client_cache[key] = obj["id"]

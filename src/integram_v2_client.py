@@ -486,13 +486,40 @@ class IntegramV2Client:
             await self._call_tool("update_object", {"objectId": order_id, "fields": fields})
             logger.info("Заказ %d обновлён: %s", order_id, list(kwargs.keys()))
 
+    async def _fetch_item_parent_map(self) -> dict[int, int]:
+        """REST-список всех позиций → {item_id: order_id}.
+
+        REST endpoint быстро возвращает id+parentId без реквизитов.
+        Orphaned items (parentId=1 от сломанного синка) исключаются.
+        """
+        await self._ensure_auth()
+        parent_map: dict[int, int] = {}
+        offset = 0
+        while True:
+            resp = await self._client.get(
+                f"{self._base_url}/api/v2/{self._workspace}/objects",
+                params={"typeId": TABLE_ORDER_ITEMS, "max": 500, "offset": offset},
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+            data = resp.json()
+            rows = data.get("data") or data.get("rows") or []
+            for row in rows:
+                rid = row.get("id")
+                pid = row.get("parentId", 1)
+                if rid and pid and pid != 1:
+                    parent_map[rid] = pid
+            if len(rows) < 500:
+                break
+            offset += len(rows)
+        return parent_map
+
     async def get_order_items(self, order_id: int) -> list[OrderItem]:
-        """Получить позиции заказа (child table, фильтр по parentId)."""
-        data = await self._call_tool("list_objects", {
-            "typeId": TABLE_ORDER_ITEMS,
-            "parentId": order_id,
-            "limit": 100,
-        })
+        """Получить позиции заказа через parentId-маппинг."""
+        parent_map = await self._fetch_item_parent_map()
+        target_ids = {iid for iid, oid in parent_map.items() if oid == order_id}
+        if not target_ids:
+            return []
+        data = await self._call_tool("list_objects", {"typeId": TABLE_ORDER_ITEMS, "limit": 5000})
         return [
             OrderItem(
                 id=row["id"],
@@ -504,15 +531,17 @@ class IntegramV2Client:
                 total=_parse_float(row.get("Сумма")) or 0,
             )
             for row in data.get("rows", [])
+            if row.get("id") in target_ids
         ]
 
     async def get_order_items_bulk(self) -> list[OrderItem]:
-        """Получить ВСЕ позиции заказов (без фильтра по parentId)."""
+        """Получить ВСЕ позиции (поля из AI tool + parentId из REST)."""
+        parent_map = await self._fetch_item_parent_map()
         data = await self._call_tool("list_objects", {"typeId": TABLE_ORDER_ITEMS, "limit": 10000})
         return [
             OrderItem(
                 id=row["id"],
-                order_id=row.get("parentId") or 0,
+                order_id=parent_map.get(row.get("id"), 0),
                 product_id=_extract_ref_id(row.get("Товар")) or 0,
                 product_name=_extract_ref_name(row.get("Товар")),
                 quantity=int(_parse_float(row.get("Количество")) or 1),

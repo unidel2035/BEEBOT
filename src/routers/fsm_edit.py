@@ -35,8 +35,9 @@ router = Router()
 _logist = None   # LogistAgent — доступ к _crm
 _bot: Optional[Bot] = None
 
-# ID таблицы «История изменений заказа» в Integram v2
-V2_HISTORY_TABLE_ID = 85932
+# ID таблиц в Integram v2
+V2_ORDERS_TABLE_ID  = 2165   # Заказы
+V2_HISTORY_TABLE_ID = 85932  # История изменений заказа (дочерняя к Заказам)
 
 
 def setup_fsm_edit(logist, bot: Bot) -> None:
@@ -173,6 +174,27 @@ async def _v2_auth(http: httpx.AsyncClient) -> str:
     return _v2_token
 
 
+async def _find_v2_order_id(http: httpx.AsyncClient, token: str, order_number: str) -> int:
+    """Найти ID заказа в v2 по номеру для привязки parentId. Возвращает 0 если не найден."""
+    try:
+        r = await http.post(
+            f"{INTEGRAM_V2_URL}/api/v2/{INTEGRAM_V2_WORKSPACE}/ai/tool",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "list_objects",
+                "args": {"typeId": V2_ORDERS_TABLE_ID, "search": order_number, "limit": 1},
+                "skipHitl": True,
+            },
+        )
+        r.raise_for_status()
+        rows = r.json().get("data", {}).get("rows") or []
+        if rows and rows[0].get("Номер") == order_number:
+            return int(rows[0]["id"])
+    except Exception as exc:
+        logger.debug("v2 поиск заказа %s: %s", order_number, exc)
+    return 0
+
+
 async def _write_v2_history(
     order_number: str,
     description: str,
@@ -183,28 +205,28 @@ async def _write_v2_history(
         return
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
-            token = await _v2_auth(http)
-            now   = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            token       = await _v2_auth(http)
+            now         = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            v2_order_id = await _find_v2_order_id(http, token, order_number)
+            args: dict  = {
+                "typeId": V2_HISTORY_TABLE_ID,
+                "name":   order_number,
+                "fields": {
+                    "Дата изменения":                     now,
+                    "Описание изменения":                 f"[{order_number}] {description}",
+                    "Статус заказа на момент изменения":  status_at_change,
+                    "Кто изменил":                        who,
+                },
+            }
+            if v2_order_id:
+                args["parentId"] = v2_order_id
             r = await http.post(
                 f"{INTEGRAM_V2_URL}/api/v2/{INTEGRAM_V2_WORKSPACE}/ai/tool",
                 headers={"Authorization": f"Bearer {token}"},
-                json={
-                    "name": "create_object",
-                    "args": {
-                        "typeId": V2_HISTORY_TABLE_ID,
-                        "name":   order_number,
-                        "fields": {
-                            "Дата изменения":                     now,
-                            "Описание изменения":                 f"[{order_number}] {description}",
-                            "Статус заказа на момент изменения":  status_at_change,
-                            "Кто изменил":                        who,
-                        },
-                    },
-                    "skipHitl": True,
-                },
+                json={"name": "create_object", "args": args, "skipHitl": True},
             )
             r.raise_for_status()
-            logger.info("v2 история записана для %s", order_number)
+            logger.info("v2 история для %s (parentId=%s)", order_number, v2_order_id or "нет")
     except Exception as exc:
         logger.warning("Не удалось записать v2 историю: %s", exc)
 

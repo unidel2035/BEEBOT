@@ -299,7 +299,7 @@ async def _get_crm():
 # Кеш заказов (orders list)
 # ---------------------------------------------------------------------------
 
-_ORDERS_CACHE_TTL = 90  # 1.5 минуты
+_ORDERS_CACHE_TTL = 600  # 10 мин (загрузка v2 ~3-4 мин, TTL должен быть больше)
 _orders_cache: Optional[list] = None
 _orders_cache_ts: float = 0.0
 _orders_cache_lock: asyncio.Lock = asyncio.Lock()

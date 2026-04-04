@@ -303,7 +303,12 @@ async def main(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     uds = UDSAdminClient(token=token, company_id=UDS_COMPANY_ID)
-    integram = IntegramClient()
+    if args.v2:
+        from src.integram_v2_client import IntegramV2Client
+        integram = IntegramV2Client()
+        logger.info("Используем Integram v2 (alekseymavai)")
+    else:
+        integram = IntegramClient()
     await integram.authenticate()
 
     # Загрузить существующие UDS-SHOP-* заказы из CRM
@@ -378,11 +383,20 @@ async def main(args: argparse.Namespace) -> None:
 
                     parsed = _parse_order_detail(detail)
 
-                    # Пропустить неоплаченные (если не dry-run)
-                    if not args.dry_run and parsed["payment_status"] not in ("PAID", "COMPLETED"):
-                        logger.debug("Пропуск %s (статус оплаты: %s)", order_number, parsed["payment_status"])
-                        skipped += 1
-                        continue
+                    # Пропустить удалённые и неоплаченные (если не dry-run)
+                    if not args.dry_run:
+                        if parsed["state"] == "DELETED":
+                            logger.debug("Пропуск %s (state=DELETED)", order_number)
+                            skipped += 1
+                            continue
+                        # Импортируем: paymentStatus PAID/COMPLETED ИЛИ state COMPLETED
+                        # (старые заказы могут иметь paymentStatus=None, но state=COMPLETED)
+                        pay_ok = parsed["payment_status"] in ("PAID", "COMPLETED")
+                        state_ok = parsed["state"] == "COMPLETED"
+                        if not pay_ok and not state_ok:
+                            logger.debug("Пропуск %s (оплата: %s, state: %s)", order_number, parsed["payment_status"], parsed["state"])
+                            skipped += 1
+                            continue
 
                     success = await sync_one_order(
                         integram, parsed,
@@ -432,5 +446,6 @@ if __name__ == "__main__":
     parser.add_argument("--since", default=None, help="Дата начала синхронизации YYYY-MM-DD")
     parser.add_argument("--limit", type=int, default=None, help="Лимит заказов")
     parser.add_argument("--token", default=None, help="Bearer-токен UDS admin")
+    parser.add_argument("--v2", action="store_true", help="Писать в Integram v2 (alekseymavai)")
     args = parser.parse_args()
     asyncio.run(main(args))

@@ -24,11 +24,20 @@ from src.integram_v2_constants import (
     TABLE_PRODUCTS, TABLE_CLIENTS, TABLE_ORDERS, TABLE_ORDER_ITEMS,
     TABLE_STATUS_HISTORY,
     STATUS_IDS, DELIVERY_IDS, SOURCE_IDS, CATEGORY_IDS,
+    REQ_ORDER_NUMBER, REQ_ORDER_DATE, REQ_ORDER_CLIENT, REQ_ORDER_SOURCE,
+    REQ_ORDER_STATUS, REQ_ORDER_DELIVERY_METHOD, REQ_ORDER_ADDRESS,
+    REQ_ORDER_TRACKING, REQ_ORDER_ITEMS_TOTAL, REQ_ORDER_DELIVERY_COST,
+    REQ_ORDER_TOTAL, REQ_ORDER_COMMENT,
 )
 from src.models import Client, Order, OrderItem, Product
 from src.phone_utils import normalize_phone
 
 logger = logging.getLogger(__name__)
+
+# Обратные справочники для парсинга REST-ответов (ID → имя)
+_STATUS_BY_ID: dict[str, str] = {v: k for k, v in STATUS_IDS.items()}
+_DELIVERY_BY_ID: dict[str, str] = {v: k for k, v in DELIVERY_IDS.items()}
+_SOURCE_BY_ID: dict[str, str] = {v: k for k, v in SOURCE_IDS.items()}
 
 
 class IntegramV2Error(Exception):
@@ -78,7 +87,7 @@ class IntegramV2Client:
         self._orders_lock: asyncio.Lock = asyncio.Lock()
         self._orders_result: Optional[list] = None
         self._orders_result_ts: float = 0.0
-        _ORDERS_RESULT_TTL = 270  # 4.5 мин — чуть меньше интервала снапшота (300с)
+        _ORDERS_RESULT_TTL = 600  # 10 мин (загрузка ~3 мин, запас) — чуть меньше интервала снапшота (300с)
 
     @property
     def api(self) -> Any:
@@ -378,18 +387,26 @@ class IntegramV2Client:
 
         start_page = 1 if last_n_pages == 0 else max(1, total_pages - last_n_pages + 1)
 
+        def _extract_ids(rows: list) -> list[int]:
+            # Включаем заказы где _child_2166 отсутствует (старые UDS) или > 0 (новые с позициями)
+            # Исключаем только _child_2166 == 0 (новые пустые дубли)
+            return [
+                row["id"] for row in rows
+                if row.get("id") and row.get("_child_2166", None) != 0
+            ]
+
         async def _fetch_page(page: int) -> list[int]:
             r = await self._client.get(
                 f"{self._base_url}/api/v2/{self._workspace}/objects",
                 params={"typeId": TABLE_ORDERS, "max": 50, "page": page},
                 headers={"Authorization": f"Bearer {self._token}"},
             )
-            return [row["id"] for row in r.json().get("data", []) if row.get("id")]
+            return _extract_ids(r.json().get("data", []))
 
         # Страница 1 уже получена — используем если она в нужном диапазоне
         ids: list[int] = []
         if start_page == 1:
-            ids = [row["id"] for row in first.get("data", []) if row.get("id")]
+            ids = _extract_ids(first.get("data", []))
 
         # Параллельная загрузка нужных страниц (батчи по 5), пропускаем стр. 1
         pages_to_fetch = [p for p in range(start_page, total_pages + 1) if p != 1]
@@ -410,17 +427,17 @@ class IntegramV2Client:
         """Получить список заказов через REST + parallel objId fetch.
 
         Стратегия (справляется с дублями):
-        1. Загрузить ВСЕ ID заказов через REST
-        2. Построить parent_map (все позиции) → узнать какие заказы имеют позиции
-        3. Загружать данные только для заказов с позициями (реальные, не дубли)
+        1. Загрузить ВСЕ ID заказов через REST (с фильтром _child_2166 != 0)
+        2. Загрузить детали каждого заказа через REST detail (быстрее MCP)
 
-        Дубли-заказы создавались без позиций → не попадут в итоговый список.
+        Фильтр _child_2166: исключает новые пустые дубли (_child_2166==0),
+        сохраняет старые UDS-заказы (нет поля) и новые с позициями (>0).
 
         Singleflight: одновременно выполняется только один полный запрос.
         Повторные вызовы ждут завершения текущего и получают тот же результат.
-        Результат кэшируется на 270 секунд.
+        Результат кэшируется на 600 секунд.
         """
-        _ORDERS_RESULT_TTL = 270  # 4.5 мин
+        _ORDERS_RESULT_TTL = 600  # 10 мин (загрузка ~3 мин, запас)
         now = _time.monotonic()
         # Быстрый путь: свежий результат без лока
         if self._orders_result is not None and (now - self._orders_result_ts) < _ORDERS_RESULT_TTL:
@@ -435,32 +452,22 @@ class IntegramV2Client:
                     return self._orders_result
 
             logger.info("get_orders: загрузка всех ID заказов...")
+            await self._ensure_auth()
             all_ids = await self._fetch_all_order_ids_rest(last_n_pages=0)
             logger.info("get_orders: %d ID заказов получено", len(all_ids))
 
-            # Строим полный parent_map (все позиции) чтобы знать какие заказы реальные
-            logger.info("get_orders: построение parent_map...")
-            parent_map = await self._fetch_item_parent_map(last_n_pages=0)
-            self._parent_map_cache = parent_map
-            self._parent_map_ts = _time.monotonic()
-            order_ids_with_items = set(parent_map.values())
-            logger.info("get_orders: %d заказов имеют позиции", len(order_ids_with_items))
-
-            # Оставляем только заказы с позициями
-            ids_to_fetch = [oid for oid in all_ids if oid in order_ids_with_items]
-            logger.info("get_orders: загружаем данные для %d заказов", len(ids_to_fetch))
-
-            # Параллельная загрузка данных заказов батчами по 20
+            # Параллельная загрузка деталей через REST (быстрее MCP, находит все заказы)
             orders: list[Order] = []
-            for i in range(0, len(ids_to_fetch), 20):
-                batch = ids_to_fetch[i:i + 20]
-                results = await asyncio.gather(*[self._fetch_order_by_id(oid) for oid in batch])
+            for i in range(0, len(all_ids), 20):
+                batch = all_ids[i:i + 20]
+                results = await asyncio.gather(*[self._fetch_order_by_id_rest(oid) for oid in batch])
                 for order in results:
                     if order is None:
                         continue
                     orders.append(order)
-                if i + 20 < len(ids_to_fetch):
+                if i + 20 < len(all_ids):
                     await asyncio.sleep(0.1)
+            logger.info("get_orders: загружено %d заказов", len(orders))
 
             self._orders_result = orders
             self._orders_result_ts = _time.monotonic()
@@ -487,6 +494,47 @@ class IntegramV2Client:
             if not data or data.get("error") or data.get("typeId") != TABLE_ORDERS:
                 return None
             return self._row_to_order(data)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_rest_order(data: dict) -> Optional["Order"]:
+        """Парсить REST /objects/{id} ответ (requisites по field-ID) в Order."""
+        if not data or data.get("typeId") != TABLE_ORDERS:
+            return None
+        reqs = data.get("requisites") or {}
+        date_str = reqs.get(REQ_ORDER_DATE, "")
+        try:
+            date = datetime.fromisoformat(date_str) if date_str else datetime.now()
+        except ValueError:
+            date = datetime.now()
+        client_id_raw = reqs.get(REQ_ORDER_CLIENT)
+        client_id = int(client_id_raw) if client_id_raw and str(client_id_raw).isdigit() else 0
+        return Order(
+            id=data["id"],
+            number=reqs.get(REQ_ORDER_NUMBER) or data.get("value", ""),
+            client_id=client_id,
+            date=date,
+            status=_STATUS_BY_ID.get(str(reqs.get(REQ_ORDER_STATUS, "")), ""),
+            delivery_method=_DELIVERY_BY_ID.get(str(reqs.get(REQ_ORDER_DELIVERY_METHOD, ""))),
+            delivery_address=reqs.get(REQ_ORDER_ADDRESS),
+            tracking_number=reqs.get(REQ_ORDER_TRACKING),
+            items_total=_parse_float(reqs.get(REQ_ORDER_ITEMS_TOTAL)),
+            delivery_cost=_parse_float(reqs.get(REQ_ORDER_DELIVERY_COST)),
+            total=_parse_float(reqs.get(REQ_ORDER_TOTAL)),
+            source=_SOURCE_BY_ID.get(str(reqs.get(REQ_ORDER_SOURCE, ""))),
+            comment=reqs.get(REQ_ORDER_COMMENT),
+            items=[],
+        )
+
+    async def _fetch_order_by_id_rest(self, order_id: int) -> Optional[Order]:
+        """Получить заказ по ID через REST detail (быстрее MCP, находит все заказы)."""
+        try:
+            r = await self._client.get(
+                f"{self._base_url}/api/v2/{self._workspace}/objects/{order_id}",
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+            return self._parse_rest_order(r.json().get("data"))
         except Exception:
             return None
 

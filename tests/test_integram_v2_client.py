@@ -252,10 +252,57 @@ async def test_get_or_create_client_creates_new():
 # Тесты: orders
 # ---------------------------------------------------------------------------
 
+# REST-формат заказа (requisites по field-ID)
+SAMPLE_REST_ORDER = {
+    "id": 200,
+    "typeId": 2165,
+    "value": "TG-20260402-1200",
+    "parentId": 1,
+    "requisites": {
+        "2195": "TG-20260402-1200",   # Номер
+        "2196": "2026-04-02T12:00:00",  # Дата
+        "2197": "100",                  # Клиент ID
+        "2198": "19",                   # Источник: Telegram
+        "2199": "179",                  # Статус: Новый
+        "2200": "191",                  # Способ доставки: СДЭК
+        "2203": "2400",                 # Сумма товаров
+        "2204": "500",                  # Стоимость доставки
+        "2205": "2900",                 # Итого
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_parse_rest_order():
+    """_parse_rest_order корректно парсит REST-ответ заказа."""
+    order = IntegramV2Client._parse_rest_order(SAMPLE_REST_ORDER)
+    assert order is not None
+    assert order.id == 200
+    assert order.number == "TG-20260402-1200"
+    assert order.client_id == 100
+    assert order.status == "Новый"
+    assert order.delivery_method == "СДЭК"
+    assert order.source == "Telegram"
+    assert order.total == 2900.0
+    assert order.items_total == 2400.0
+    assert order.delivery_cost == 500.0
+
+
+@pytest.mark.asyncio
+async def test_parse_rest_order_wrong_type():
+    """_parse_rest_order возвращает None для объектов не-заказов."""
+    assert IntegramV2Client._parse_rest_order({"id": 1, "typeId": 9999}) is None
+    assert IntegramV2Client._parse_rest_order({}) is None
+    assert IntegramV2Client._parse_rest_order(None) is None  # type: ignore[arg-type]
+
+
 @pytest.mark.asyncio
 async def test_get_orders():
     client = _make_client()
-    client._call_tool.return_value = SAMPLE_ORDERS_RESPONSE
+    # Мокаем REST-методы напрямую
+    client._fetch_all_order_ids_rest = AsyncMock(return_value=[200])  # type: ignore[method-assign]
+    sample_order = IntegramV2Client._parse_rest_order(SAMPLE_REST_ORDER)
+    client._fetch_order_by_id_rest = AsyncMock(return_value=sample_order)  # type: ignore[method-assign]
 
     orders = await client.get_orders()
 
@@ -270,11 +317,15 @@ async def test_get_orders():
 @pytest.mark.asyncio
 async def test_get_orders_filter_by_status():
     client = _make_client()
-    client._call_tool.return_value = SAMPLE_ORDERS_RESPONSE
+    client._fetch_all_order_ids_rest = AsyncMock(return_value=[200])  # type: ignore[method-assign]
+    sample_order = IntegramV2Client._parse_rest_order(SAMPLE_REST_ORDER)
+    client._fetch_order_by_id_rest = AsyncMock(return_value=sample_order)  # type: ignore[method-assign]
 
     orders = await client.get_orders(status="Отправлен")
     assert len(orders) == 0
 
+    # Сбрасываем кэш для второго вызова
+    client._orders_result = None
     orders = await client.get_orders(status="Новый")
     assert len(orders) == 1
 

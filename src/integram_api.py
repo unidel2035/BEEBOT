@@ -212,7 +212,7 @@ class IntegramAPI:
         kwargs.setdefault("cookies", {_DB: self._token or ""})
         resp = await getattr(http, method)(url, **kwargs)
 
-        if resp.status_code in (401, 403) and self._token:
+        if resp.status_code in (401, 403):
             logger.warning("Integram сессия истекла, повторная авторизация...")
             await self.authenticate()
             kwargs["cookies"] = {_DB: self._token or ""}

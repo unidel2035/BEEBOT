@@ -70,6 +70,19 @@ class IntegramV2Client:
         self._token: str | None = None
         self._token_exp: float = 0
         self._authenticated = False
+        self._api: Any = None  # Lazy IntegramAPI v1 для user management
+
+    @property
+    def api(self) -> Any:
+        """Возвращает IntegramAPI v1 для user management (веб-панель).
+
+        Пользователи хранятся в v1 CRM независимо от INTEGRAM_V2 флага.
+        Инициализируется лениво при первом обращении.
+        """
+        if self._api is None:
+            from src.integram_api import IntegramAPI
+            self._api = IntegramAPI()
+        return self._api
 
     # ------------------------------------------------------------------
     # Auth

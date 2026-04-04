@@ -26,6 +26,12 @@ web/dist/
 # Temporary files
 tmp/
 
+# Playwright MCP
+.playwright-mcp/
+
+# Merge conflict artifacts
+*.rej
+
 # Documents (not code)
 *.pdf
 *.xlsx

@@ -549,12 +549,17 @@ class IntegramV2Client:
             await self._call_tool("update_object", {"objectId": order_id, "fields": fields})
             logger.info("Заказ %d обновлён: %s", order_id, list(kwargs.keys()))
 
-    async def _fetch_item_parent_map(self) -> dict[int, int]:
-        """REST-список всех позиций → {item_id: order_id}.
+    async def _fetch_item_parent_map(self, last_n_pages: int = 60) -> dict[int, int]:
+        """REST-список позиций → {item_id: order_id}.
 
         REST endpoint возвращает id+parentId без реквизитов.
         Использует page-пагинацию (offset не поддерживается).
         Orphaned items (parentId=1) исключаются.
+
+        last_n_pages: загружать только последние N страниц (0 = все).
+        Для свежих заказов достаточно последних страниц (новые позиции
+        имеют наибольшие ID и находятся на последних страницах).
+        Значение 60 = 3000 позиций, хватит для ~1000 последних заказов.
         """
         await self._ensure_auth()
         parent_map: dict[int, int] = {}
@@ -566,30 +571,51 @@ class IntegramV2Client:
                 if rid and pid and pid != 1:
                     parent_map[rid] = pid
 
-        # Первая страница + мета
+        # Первая страница + мета (нужна для total_pages)
         resp = await self._client.get(
             f"{self._base_url}/api/v2/{self._workspace}/objects",
             params={"typeId": TABLE_ORDER_ITEMS, "max": 50, "page": 1},
             headers={"Authorization": f"Bearer {self._token}"},
         )
         first = resp.json()
-        _parse_page(first.get("data") or [])
         total_pages = first.get("meta", {}).get("totalPages", 1)
 
-        async def _fetch_page(page: int) -> list:
-            r = await self._client.get(
-                f"{self._base_url}/api/v2/{self._workspace}/objects",
-                params={"typeId": TABLE_ORDER_ITEMS, "max": 50, "page": page},
-                headers={"Authorization": f"Bearer {self._token}"},
-            )
-            return r.json().get("data") or []
+        # Определяем диапазон страниц (только последние last_n_pages)
+        if last_n_pages > 0:
+            start_page = max(1, total_pages - last_n_pages + 1)
+        else:
+            start_page = 1
 
-        # Параллельная загрузка остальных страниц (батчи по 30)
-        for i in range(0, total_pages - 1, 30):
-            batch_pages = list(range(2 + i, min(2 + i + 30, total_pages + 1)))
-            results = await asyncio.gather(*[_fetch_page(p) for p in batch_pages])
+        if start_page == 1:
+            _parse_page(first.get("data") or [])
+
+        async def _fetch_page(page: int) -> list:
+            for attempt in range(3):
+                try:
+                    r = await self._client.get(
+                        f"{self._base_url}/api/v2/{self._workspace}/objects",
+                        params={"typeId": TABLE_ORDER_ITEMS, "max": 50, "page": page},
+                        headers={"Authorization": f"Bearer {self._token}"},
+                    )
+                    return r.json().get("data") or []
+                except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TimeoutException):
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt)
+                    else:
+                        logger.warning("_fetch_item_parent_map: стр.%d — таймаут, пропуск", page)
+                        return []
+
+        # Параллельная загрузка (батчи по 5) — не перегружать сервер
+        pages_to_fetch = [p for p in range(start_page, total_pages + 1) if p != 1]
+        logger.info("_fetch_item_parent_map: загружаем стр. %d–%d из %d (батчи по 5)",
+                    start_page, total_pages, total_pages)
+        for i in range(0, len(pages_to_fetch), 5):
+            batch = pages_to_fetch[i:i + 5]
+            results = await asyncio.gather(*[_fetch_page(p) for p in batch])
             for rows in results:
                 _parse_page(rows)
+            if i + 5 < len(pages_to_fetch):
+                await asyncio.sleep(0.3)  # пауза между батчами
 
         return parent_map
 

@@ -72,6 +72,8 @@ class IntegramV2Client:
         self._token_exp: float = 0
         self._authenticated = False
         self._api: Any = None  # Lazy IntegramAPI v1 для user management
+        self._parent_map_cache: dict[int, int] = {}
+        self._parent_map_ts: float = 0.0  # monotonic timestamp последней загрузки
 
     @property
     def api(self) -> Any:
@@ -384,13 +386,15 @@ class IntegramV2Client:
         if start_page == 1:
             ids = [row["id"] for row in first.get("data", []) if row.get("id")]
 
-        # Параллельная загрузка нужных страниц (батчи по 20), пропускаем стр. 1
+        # Параллельная загрузка нужных страниц (батчи по 5), пропускаем стр. 1
         pages_to_fetch = [p for p in range(start_page, total_pages + 1) if p != 1]
-        for i in range(0, len(pages_to_fetch), 20):
-            batch = pages_to_fetch[i:i + 20]
+        for i in range(0, len(pages_to_fetch), 5):
+            batch = pages_to_fetch[i:i + 5]
             results = await asyncio.gather(*[_fetch_page(p) for p in batch])
             for page_ids in results:
                 ids.extend(page_ids)
+            if i + 5 < len(pages_to_fetch):
+                await asyncio.sleep(0.2)
         return ids
 
     async def get_orders(
@@ -398,18 +402,36 @@ class IntegramV2Client:
         client_id: Optional[int] = None,
         status: Optional[str] = None,
     ) -> list[Order]:
-        """Получить список заказов через REST-пагинацию + parallel objId fetch.
+        """Получить список заказов через REST + parallel objId fetch.
 
-        Загружает все ID через REST, затем параллельно получает поля через AI tool.
+        Стратегия (справляется с дублями):
+        1. Загрузить ВСЕ ID заказов через REST
+        2. Построить parent_map (все позиции) → узнать какие заказы имеют позиции
+        3. Загружать данные только для заказов с позициями (реальные, не дубли)
+
+        Дубли-заказы создавались без позиций → не попадут в итоговый список.
         """
-        # Загружаем последние 10 страниц (500 последних заказов)
-        # После очистки дублей можно увеличить или убрать лимит
-        all_ids = await self._fetch_all_order_ids_rest(last_n_pages=10)
+        logger.info("get_orders: загрузка всех ID заказов...")
+        all_ids = await self._fetch_all_order_ids_rest(last_n_pages=0)
+        logger.info("get_orders: %d ID заказов получено", len(all_ids))
+
+        # Строим полный parent_map (все позиции) чтобы знать какие заказы реальные
+        # Кэш позволяет не загружать дважды если get_order_items_bulk вызвать сразу после
+        logger.info("get_orders: построение parent_map...")
+        parent_map = await self._fetch_item_parent_map(last_n_pages=0)
+        self._parent_map_cache = parent_map
+        self._parent_map_ts = _time.monotonic()
+        order_ids_with_items = set(parent_map.values())
+        logger.info("get_orders: %d заказов имеют позиции", len(order_ids_with_items))
+
+        # Оставляем только заказы с позициями
+        ids_to_fetch = [oid for oid in all_ids if oid in order_ids_with_items]
+        logger.info("get_orders: загружаем данные для %d заказов", len(ids_to_fetch))
 
         # Параллельная загрузка данных заказов батчами по 20
         orders: list[Order] = []
-        for i in range(0, len(all_ids), 20):
-            batch = all_ids[i:i + 20]
+        for i in range(0, len(ids_to_fetch), 20):
+            batch = ids_to_fetch[i:i + 20]
             results = await asyncio.gather(*[self._fetch_order_by_id(oid) for oid in batch])
             for order in results:
                 if order is None:
@@ -419,6 +441,8 @@ class IntegramV2Client:
                 if status is not None and order.status != status:
                     continue
                 orders.append(order)
+            if i + 20 < len(ids_to_fetch):
+                await asyncio.sleep(0.1)
         return orders
 
     async def get_order(self, order_id: int) -> Order:
@@ -648,7 +672,15 @@ class IntegramV2Client:
         order_ids — если указан, загружает только позиции этих заказов.
         Без фильтра загружает ВСЕ позиции (может быть долго при большом объёме).
         """
-        parent_map = await self._fetch_item_parent_map()
+        # Используем кэш parent_map если он свежий (< 300 сек)
+        _map_age = _time.monotonic() - self._parent_map_ts
+        if self._parent_map_cache and _map_age < 300:
+            logger.debug("get_order_items_bulk: используем кэш parent_map (%ds)", int(_map_age))
+            parent_map = self._parent_map_cache
+        else:
+            parent_map = await self._fetch_item_parent_map(last_n_pages=0)
+            self._parent_map_cache = parent_map
+            self._parent_map_ts = _time.monotonic()
 
         # Фильтруем item_ids по нужным заказам
         if order_ids is not None:

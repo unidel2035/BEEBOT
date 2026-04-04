@@ -510,7 +510,7 @@ class IntegramClient:
             for item in raw
         ]
 
-    async def get_order_items_bulk(self) -> list[OrderItem]:
+    async def get_order_items_bulk(self, order_ids=None) -> list[OrderItem]:
         """Получить ВСЕ позиции заказов (для аналитики)."""
         raw = await self._api.get_order_items(order_id=None)
         return [

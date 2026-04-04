@@ -370,7 +370,6 @@ class IntegramV2Client:
         total_pages = meta.get("totalPages", 1)
 
         start_page = 1 if last_n_pages == 0 else max(1, total_pages - last_n_pages + 1)
-        pages_to_fetch = list(range(start_page, total_pages + 1))
 
         async def _fetch_page(page: int) -> list[int]:
             r = await self._client.get(
@@ -380,12 +379,13 @@ class IntegramV2Client:
             )
             return [row["id"] for row in r.json().get("data", []) if row.get("id")]
 
-        # Первая страница уже получена
-        ids: list[int] = [row["id"] for row in first.get("data", []) if row.get("id")]
-        if pages_to_fetch[0] == 1:
-            pages_to_fetch = pages_to_fetch[1:]  # не дублируем страницу 1
+        # Страница 1 уже получена — используем если она в нужном диапазоне
+        ids: list[int] = []
+        if start_page == 1:
+            ids = [row["id"] for row in first.get("data", []) if row.get("id")]
 
-        # Параллельная загрузка остальных страниц (батчи по 20)
+        # Параллельная загрузка нужных страниц (батчи по 20), пропускаем стр. 1
+        pages_to_fetch = [p for p in range(start_page, total_pages + 1) if p != 1]
         for i in range(0, len(pages_to_fetch), 20):
             batch = pages_to_fetch[i:i + 20]
             results = await asyncio.gather(*[_fetch_page(p) for p in batch])

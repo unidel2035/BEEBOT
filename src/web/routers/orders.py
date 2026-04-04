@@ -57,6 +57,11 @@ async def list_orders(
         crm = await _get_crm()
         try:
             all_orders = await get_orders_cache(crm)
+            # Прикрепить позиции к заказам
+            items_cache = await get_items_cache(crm)
+            for o in all_orders:
+                if not o.items:
+                    o.items = items_cache.get(o.id, [])
             # Фильтрация по датам до сериализации (работаем с datetime-объектами)
             if date_from:
                 all_orders = [o for o in all_orders if o.date and o.date.date() >= date_from]

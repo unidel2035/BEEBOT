@@ -74,6 +74,11 @@ class IntegramV2Client:
         self._api: Any = None  # Lazy IntegramAPI v1 для user management
         self._parent_map_cache: dict[int, int] = {}
         self._parent_map_ts: float = 0.0  # monotonic timestamp последней загрузки
+        # Singleflight: один get_orders() за раз, остальные ждут и получают тот же результат
+        self._orders_lock: asyncio.Lock = asyncio.Lock()
+        self._orders_result: Optional[list] = None
+        self._orders_result_ts: float = 0.0
+        _ORDERS_RESULT_TTL = 270  # 4.5 мин — чуть меньше интервала снапшота (300с)
 
     @property
     def api(self) -> Any:
@@ -410,40 +415,63 @@ class IntegramV2Client:
         3. Загружать данные только для заказов с позициями (реальные, не дубли)
 
         Дубли-заказы создавались без позиций → не попадут в итоговый список.
+
+        Singleflight: одновременно выполняется только один полный запрос.
+        Повторные вызовы ждут завершения текущего и получают тот же результат.
+        Результат кэшируется на 270 секунд.
         """
-        logger.info("get_orders: загрузка всех ID заказов...")
-        all_ids = await self._fetch_all_order_ids_rest(last_n_pages=0)
-        logger.info("get_orders: %d ID заказов получено", len(all_ids))
+        _ORDERS_RESULT_TTL = 270  # 4.5 мин
+        now = _time.monotonic()
+        # Быстрый путь: свежий результат без лока
+        if self._orders_result is not None and (now - self._orders_result_ts) < _ORDERS_RESULT_TTL:
+            if client_id is None and status is None:
+                return self._orders_result
 
-        # Строим полный parent_map (все позиции) чтобы знать какие заказы реальные
-        # Кэш позволяет не загружать дважды если get_order_items_bulk вызвать сразу после
-        logger.info("get_orders: построение parent_map...")
-        parent_map = await self._fetch_item_parent_map(last_n_pages=0)
-        self._parent_map_cache = parent_map
-        self._parent_map_ts = _time.monotonic()
-        order_ids_with_items = set(parent_map.values())
-        logger.info("get_orders: %d заказов имеют позиции", len(order_ids_with_items))
+        async with self._orders_lock:
+            # Повторная проверка под локом
+            now = _time.monotonic()
+            if self._orders_result is not None and (now - self._orders_result_ts) < _ORDERS_RESULT_TTL:
+                if client_id is None and status is None:
+                    return self._orders_result
 
-        # Оставляем только заказы с позициями
-        ids_to_fetch = [oid for oid in all_ids if oid in order_ids_with_items]
-        logger.info("get_orders: загружаем данные для %d заказов", len(ids_to_fetch))
+            logger.info("get_orders: загрузка всех ID заказов...")
+            all_ids = await self._fetch_all_order_ids_rest(last_n_pages=0)
+            logger.info("get_orders: %d ID заказов получено", len(all_ids))
 
-        # Параллельная загрузка данных заказов батчами по 20
-        orders: list[Order] = []
-        for i in range(0, len(ids_to_fetch), 20):
-            batch = ids_to_fetch[i:i + 20]
-            results = await asyncio.gather(*[self._fetch_order_by_id(oid) for oid in batch])
-            for order in results:
-                if order is None:
-                    continue
-                if client_id is not None and order.client_id != client_id:
-                    continue
-                if status is not None and order.status != status:
-                    continue
-                orders.append(order)
-            if i + 20 < len(ids_to_fetch):
-                await asyncio.sleep(0.1)
-        return orders
+            # Строим полный parent_map (все позиции) чтобы знать какие заказы реальные
+            logger.info("get_orders: построение parent_map...")
+            parent_map = await self._fetch_item_parent_map(last_n_pages=0)
+            self._parent_map_cache = parent_map
+            self._parent_map_ts = _time.monotonic()
+            order_ids_with_items = set(parent_map.values())
+            logger.info("get_orders: %d заказов имеют позиции", len(order_ids_with_items))
+
+            # Оставляем только заказы с позициями
+            ids_to_fetch = [oid for oid in all_ids if oid in order_ids_with_items]
+            logger.info("get_orders: загружаем данные для %d заказов", len(ids_to_fetch))
+
+            # Параллельная загрузка данных заказов батчами по 20
+            orders: list[Order] = []
+            for i in range(0, len(ids_to_fetch), 20):
+                batch = ids_to_fetch[i:i + 20]
+                results = await asyncio.gather(*[self._fetch_order_by_id(oid) for oid in batch])
+                for order in results:
+                    if order is None:
+                        continue
+                    orders.append(order)
+                if i + 20 < len(ids_to_fetch):
+                    await asyncio.sleep(0.1)
+
+            self._orders_result = orders
+            self._orders_result_ts = _time.monotonic()
+
+        # Применяем фильтры после загрузки
+        result = self._orders_result or []
+        if client_id is not None:
+            result = [o for o in result if o.client_id == client_id]
+        if status is not None:
+            result = [o for o in result if o.status == status]
+        return result
 
     async def get_order(self, order_id: int) -> Order:
         """Получить заказ по ID."""

@@ -849,9 +849,10 @@ class IntegramV2Client:
         return {
             "total_orders": len(orders),
             "total_clients": len(clients),
-            "total_products": len(products),
             "total_revenue": total_revenue,
-            "active_orders": len(active_orders),
+            "avg_order": total_revenue / len(orders) if orders else 0.0,
+            "new_orders": sum(1 for o in orders if o.status == "Новый"),
+            "delivered_orders": sum(1 for o in orders if o.status == "Доставлен"),
         }
 
     async def get_order_history(self, order_id: int) -> list[dict]:

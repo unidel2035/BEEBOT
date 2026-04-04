@@ -836,7 +836,7 @@ class IntegramV2Client:
 
         return Order(
             id=row.get("id", 0),
-            number=row.get("name", ""),
+            number=row.get("Номер") or row.get("name", ""),
             client_id=_extract_ref_id(row.get("Клиент")) or 0,
             client_name=_extract_ref_name(row.get("Клиент")),
             date=date,

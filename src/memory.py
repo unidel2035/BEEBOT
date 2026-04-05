@@ -101,6 +101,21 @@ class UserMemory:
                 conn.execute(
                     "ALTER TABLE user_memory ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'global'"
                 )
+            # M.3: таблица эпизодов (история взаимодействий агентов с пользователем)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS episodes (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    INTEGER NOT NULL,
+                    agent_id   TEXT    NOT NULL DEFAULT 'global',
+                    event_type TEXT    NOT NULL,
+                    summary    TEXT    NOT NULL,
+                    detail     TEXT,
+                    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ep_user_id ON episodes(user_id)"
+            )
 
     def get_facts(self, telegram_id: int, agent_id: str | None = None) -> list[str]:
         """Вернуть факты о пользователе (последние 20, свежие сначала).
@@ -172,3 +187,64 @@ class UserMemory:
                 (telegram_id,),
             ).fetchone()
         return row[0] if row else 0
+
+    # ------------------------------------------------------------------
+    # M.3: Episodes — история взаимодействий агентов с пользователем
+    # ------------------------------------------------------------------
+
+    def add_episode(
+        self,
+        user_id: int,
+        agent_id: str,
+        event_type: str,
+        summary: str,
+        detail: str | None = None,
+    ) -> int:
+        """Сохранить эпизод взаимодействия. Возвращает id новой записи."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO episodes (user_id, agent_id, event_type, summary, detail) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, agent_id, event_type, summary, detail),
+            )
+            return cur.lastrowid  # type: ignore[return-value]
+
+    def get_episodes(
+        self,
+        user_id: int,
+        agent_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Вернуть эпизоды пользователя (свежие первыми).
+
+        Args:
+            agent_id:   фильтр по агенту. None — все агенты.
+            event_type: фильтр по типу события. None — все типы.
+            limit:      максимальное количество записей.
+        """
+        query = "SELECT id, user_id, agent_id, event_type, summary, detail, created_at FROM episodes WHERE user_id = ?"
+        params: list = [user_id]
+        if agent_id is not None:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        if event_type is not None:
+            query += " AND event_type = ?"
+            params.append(event_type)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "id": row[0],
+                "user_id": row[1],
+                "agent_id": row[2],
+                "event_type": row[3],
+                "summary": row[4],
+                "detail": row[5],
+                "created_at": row[6],
+            }
+            for row in rows
+        ]

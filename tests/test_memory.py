@@ -1,4 +1,4 @@
-"""Tests for src/memory.py — UserMemory with agent_id namespace (M.2)."""
+"""Tests for src/memory.py — UserMemory with agent_id namespace (M.2) + episodes (M.3)."""
 
 import tempfile
 from pathlib import Path
@@ -169,3 +169,90 @@ class TestAgentIdNamespace:
             # Старые записи должны получить agent_id='global' по умолчанию
             global_facts = mem.get_facts(3001, agent_id="global")
             assert "старый факт" in global_facts
+
+
+# ---------------------------------------------------------------------------
+# M.3: Таблица episodes
+# ---------------------------------------------------------------------------
+
+class TestEpisodes:
+    def test_add_episode_returns_id(self, mem):
+        """add_episode должен вернуть id новой записи."""
+        ep_id = mem.add_episode(
+            user_id=5001,
+            agent_id="beebot",
+            event_type="consult",
+            summary="Спросил про прополис",
+            detail="Пользователь интересовался дозировкой прополиса",
+        )
+        assert isinstance(ep_id, int)
+        assert ep_id > 0
+
+    def test_get_episodes_returns_added(self, mem):
+        """get_episodes должен вернуть добавленные эпизоды."""
+        mem.add_episode(5002, "beebot", "consult", "Вопрос про мёд", "Детали")
+        episodes = mem.get_episodes(5002)
+        assert len(episodes) == 1
+        ep = episodes[0]
+        assert ep["user_id"] == 5002
+        assert ep["agent_id"] == "beebot"
+        assert ep["event_type"] == "consult"
+        assert ep["summary"] == "Вопрос про мёд"
+        assert ep["detail"] == "Детали"
+        assert "created_at" in ep
+
+    def test_get_episodes_filtered_by_agent_id(self, mem):
+        """get_episodes(agent_id=...) должен фильтровать по агенту."""
+        mem.add_episode(5003, "beebot", "consult", "beebot эпизод", "")
+        mem.add_episode(5003, "logist", "order", "logist эпизод", "")
+
+        beebot_eps = mem.get_episodes(5003, agent_id="beebot")
+        assert len(beebot_eps) == 1
+        assert beebot_eps[0]["summary"] == "beebot эпизод"
+
+    def test_get_episodes_filtered_by_event_type(self, mem):
+        """get_episodes(event_type=...) должен фильтровать по типу события."""
+        mem.add_episode(5004, "beebot", "consult", "консультация", "")
+        mem.add_episode(5004, "logist", "order", "заказ", "")
+
+        orders = mem.get_episodes(5004, event_type="order")
+        assert len(orders) == 1
+        assert orders[0]["event_type"] == "order"
+
+    def test_get_episodes_none_agent_returns_all(self, mem):
+        """get_episodes без фильтра возвращает эпизоды всех агентов."""
+        mem.add_episode(5005, "beebot", "consult", "консультация", "")
+        mem.add_episode(5005, "logist", "order", "заказ", "")
+
+        all_eps = mem.get_episodes(5005)
+        assert len(all_eps) == 2
+
+    def test_get_episodes_limit(self, mem):
+        """get_episodes должен уважать параметр limit."""
+        for i in range(5):
+            mem.add_episode(5006, "beebot", "consult", f"эпизод {i}", "")
+
+        eps = mem.get_episodes(5006, limit=3)
+        assert len(eps) == 3
+
+    def test_get_episodes_newest_first(self, mem):
+        """get_episodes должен возвращать свежие эпизоды первыми."""
+        mem.add_episode(5007, "beebot", "consult", "первый", "")
+        mem.add_episode(5007, "beebot", "consult", "второй", "")
+
+        eps = mem.get_episodes(5007)
+        assert eps[0]["summary"] == "второй"
+        assert eps[1]["summary"] == "первый"
+
+    def test_get_episodes_isolation_between_users(self, mem):
+        """Эпизоды одного пользователя не видны другому."""
+        mem.add_episode(5008, "beebot", "consult", "эпизод пользователя 1", "")
+        eps = mem.get_episodes(5009)
+        assert eps == []
+
+    def test_detail_can_be_none(self, mem):
+        """detail может быть None."""
+        ep_id = mem.add_episode(5010, "beebot", "consult", "краткий эпизод", None)
+        assert ep_id > 0
+        eps = mem.get_episodes(5010)
+        assert eps[0]["detail"] is None

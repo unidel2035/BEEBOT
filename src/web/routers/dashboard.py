@@ -67,6 +67,26 @@ async def get_dashboard_charts(
         raise HTTPException(502, "Ошибка CRM")
 
 
+@router.get("/api/dashboard/forecast")
+async def get_dashboard_forecast(
+    request: Request,
+    horizon: int = 30,
+    _: CurrentUser = Depends(_require_role("admin")),
+) -> dict[str, Any]:
+    """Прогноз спроса. horizon: 30|60|90 (дней)"""
+    if horizon not in (30, 60, 90):
+        horizon = 30
+    try:
+        svc = _get_dashboard_service(request)
+        if not svc._crm:
+            crm = await _get_crm()
+            svc.set_crm(crm)
+        return await svc.get_forecast(horizon_days=horizon)
+    except (IntegramError, IntegramAPIError) as exc:
+        logger.error("Ошибка Integram: %s", exc)
+        raise HTTPException(502, "Ошибка CRM")
+
+
 @router.get("/api/dashboard/alerts")
 async def get_dashboard_alerts(
     request: Request,

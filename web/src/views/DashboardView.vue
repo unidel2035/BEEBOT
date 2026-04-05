@@ -169,6 +169,44 @@
       </div>
     </div>
 
+    <!-- Прогноз спроса -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold text-gray-700">Прогноз спроса</h3>
+        <div class="flex gap-2">
+          <Button
+            v-for="h in forecastHorizons"
+            :key="h.value"
+            :label="h.label"
+            :outlined="forecastHorizon !== h.value"
+            size="small"
+            @click="loadForecast(h.value)"
+          />
+        </div>
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <!-- График -->
+        <div class="lg:col-span-2">
+          <Chart v-if="forecastChartData" type="line" :data="forecastChartData" :options="forecastChartOptions" class="h-56" />
+          <Skeleton v-else height="224px" class="rounded-lg" />
+        </div>
+        <!-- Таблица товаров -->
+        <div>
+          <p class="text-xs text-gray-500 mb-2">Рекомендуемый запас</p>
+          <Skeleton v-if="!forecastProducts" height="160px" class="rounded-lg" />
+          <table v-else-if="forecastProducts.length" class="w-full text-sm">
+            <tbody>
+              <tr v-for="p in forecastProducts" :key="p.name" class="border-b border-gray-50 last:border-0">
+                <td class="py-1.5 text-gray-700 pr-2">{{ p.name }}</td>
+                <td class="py-1.5 text-right font-medium text-amber-700 whitespace-nowrap">~{{ p.forecast_qty }} шт.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="text-sm text-gray-400">Нет данных по товарам</p>
+        </div>
+      </div>
+    </div>
+
     <!-- Последние заказы -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
       <div class="flex items-center justify-between mb-4">
@@ -240,7 +278,7 @@ import Column from 'primevue/column'
 import Skeleton from 'primevue/skeleton'
 import Chart from 'primevue/chart'
 import Button from 'primevue/button'
-import { getDashboard, getDashboardCharts, getDashboardAlerts, getOrders, getOrderItems, downloadSalesReport } from '../api.js'
+import { getDashboard, getDashboardCharts, getDashboardAlerts, getDashboardForecast, getOrders, getOrderItems, downloadSalesReport } from '../api.js'
 import StatCard from '../components/StatCard.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { formatDate, formatMoney } from '../utils.js'
@@ -287,6 +325,65 @@ async function downloadReport(period) {
     await downloadSalesReport(period)
   } finally {
     reportLoading.value = null
+  }
+}
+
+// Прогноз спроса
+const forecastHorizon = ref(30)
+const forecastChartData = ref(null)
+const forecastProducts = ref(null)
+const forecastHorizons = [
+  { label: '1 мес', value: 30 },
+  { label: '2 мес', value: 60 },
+  { label: 'Квартал', value: 90 },
+]
+const forecastChartOptions = {
+  responsive: true,
+  plugins: {
+    legend: { position: 'top' },
+    tooltip: {
+      callbacks: {
+        label: (ctx) => ctx.parsed.y != null ? `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString('ru')} ₽` : '',
+      }
+    }
+  },
+  scales: {
+    y: { ticks: { callback: (v) => v.toLocaleString('ru') + ' ₽' } }
+  }
+}
+
+async function loadForecast(horizon = 30) {
+  forecastHorizon.value = horizon
+  forecastChartData.value = null
+  forecastProducts.value = null
+  try {
+    const data = await getDashboardForecast(horizon)
+    forecastProducts.value = data.products || []
+    forecastChartData.value = {
+      labels: data.labels,
+      datasets: [
+        {
+          label: 'Факт',
+          data: data.actual,
+          borderColor: '#f59e0b',
+          backgroundColor: 'rgba(245,158,11,0.15)',
+          tension: 0.3,
+          fill: true,
+        },
+        {
+          label: 'Прогноз',
+          data: data.forecast,
+          borderColor: '#6366f1',
+          backgroundColor: 'rgba(99,102,241,0.1)',
+          borderDash: [6, 3],
+          tension: 0.3,
+          fill: false,
+          spanGaps: false,
+        },
+      ],
+    }
+  } catch (e) {
+    forecastProducts.value = []
   }
 }
 const expandedRows = ref({})
@@ -460,7 +557,10 @@ async function loadDashboard() {
   }
 }
 
-onMounted(loadDashboard)
+onMounted(() => {
+  loadDashboard()
+  loadForecast(30)
+})
 </script>
 
 <style scoped>

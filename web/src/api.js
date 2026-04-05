@@ -69,6 +69,11 @@ export async function getDashboardAlerts() {
   return data
 }
 
+export async function getDashboardForecast(horizon = 30) {
+  const { data } = await http.get('/dashboard/forecast', { params: { horizon } })
+  return data
+}
+
 // ---------------------------------------------------------------------------
 // Reference
 // ---------------------------------------------------------------------------

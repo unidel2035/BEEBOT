@@ -88,22 +88,41 @@ class UserMemory:
                     fact        TEXT    NOT NULL,
                     category    TEXT    NOT NULL DEFAULT 'general',
                     source      TEXT    NOT NULL DEFAULT 'auto',
+                    agent_id    TEXT    NOT NULL DEFAULT 'global',
                     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
                 )
             """)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tg_id ON user_memory(telegram_id)"
             )
+            # Миграция: добавить agent_id если отсутствует (старая БД)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(user_memory)")}
+            if "agent_id" not in cols:
+                conn.execute(
+                    "ALTER TABLE user_memory ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'global'"
+                )
 
-    def get_facts(self, telegram_id: int) -> list[str]:
-        """Вернуть все факты о пользователе (последние 20, свежие сначала)."""
+    def get_facts(self, telegram_id: int, agent_id: str | None = None) -> list[str]:
+        """Вернуть факты о пользователе (последние 20, свежие сначала).
+
+        Args:
+            agent_id: фильтр по агенту. None — все агенты (backward compat).
+        """
         with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT fact FROM user_memory "
-                "WHERE telegram_id = ? "
-                "ORDER BY created_at DESC LIMIT 20",
-                (telegram_id,),
-            ).fetchall()
+            if agent_id is None:
+                rows = conn.execute(
+                    "SELECT fact FROM user_memory "
+                    "WHERE telegram_id = ? "
+                    "ORDER BY created_at DESC LIMIT 20",
+                    (telegram_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT fact FROM user_memory "
+                    "WHERE telegram_id = ? AND agent_id = ? "
+                    "ORDER BY created_at DESC LIMIT 20",
+                    (telegram_id, agent_id),
+                ).fetchall()
         return [row[0] for row in rows]
 
     def add_fact(
@@ -112,26 +131,27 @@ class UserMemory:
         fact: str,
         category: str = "general",
         source: str = "auto",
+        agent_id: str = "global",
     ) -> bool:
-        """Добавить факт. Возвращает True если добавлен (не дубль)."""
+        """Добавить факт. Возвращает True если добавлен (не дубль в рамках агента)."""
         fact = fact.strip()
         if not fact:
             return False
         with sqlite3.connect(self.db_path) as conn:
             exists = conn.execute(
-                "SELECT id FROM user_memory WHERE telegram_id = ? AND fact = ?",
-                (telegram_id, fact),
+                "SELECT id FROM user_memory WHERE telegram_id = ? AND fact = ? AND agent_id = ?",
+                (telegram_id, fact, agent_id),
             ).fetchone()
             if exists:
                 return False
             conn.execute(
-                "INSERT INTO user_memory (telegram_id, fact, category, source) "
-                "VALUES (?, ?, ?, ?)",
-                (telegram_id, fact, category, source),
+                "INSERT INTO user_memory (telegram_id, fact, category, source, agent_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (telegram_id, fact, category, source, agent_id),
             )
         logger.info(
-            "Memory: добавлен факт user=%d [%s/%s]: %.60s",
-            telegram_id, category, source, fact,
+            "Memory: добавлен факт user=%d [%s/%s/%s]: %.60s",
+            telegram_id, category, source, agent_id, fact,
         )
         return True
 

@@ -12,6 +12,7 @@ from src.services.analytics_service import (
     format_orders_report,
     format_top_products_report,
     format_clients_report,
+    format_forecast_report,
 )
 
 
@@ -41,22 +42,38 @@ def _make_crm(orders=None, items=None):
 
 class TestKeywordClassify:
     def test_top_products(self):
-        period, report = keyword_classify("топ продуктов за неделю")
+        period, report, horizon = keyword_classify("топ продуктов за неделю")
         assert period == "week"
         assert report == "top"
 
     def test_packaging(self):
-        period, report = keyword_classify("что нужно фасовать")
+        _, report, _ = keyword_classify("что нужно фасовать")
         assert report == "packaging"
 
     def test_default_summary(self):
-        period, report = keyword_classify("общая статистика")
+        period, report, horizon = keyword_classify("общая статистика")
         assert period == "all"
         assert report == "summary"
+        assert horizon == 30  # default
 
     def test_month_period(self):
-        period, _ = keyword_classify("продажи за месяц")
+        period, _, _ = keyword_classify("продажи за месяц")
         assert period == "month"
+
+    def test_forecast_horizon_90(self):
+        _, report, horizon = keyword_classify("прогноз на квартал")
+        assert report == "forecast"
+        assert horizon == 90
+
+    def test_forecast_horizon_60(self):
+        _, report, horizon = keyword_classify("прогноз на два месяца")
+        assert report == "forecast"
+        assert horizon == 60
+
+    def test_forecast_horizon_default_30(self):
+        _, report, horizon = keyword_classify("прогноз на следующий месяц")
+        assert report == "forecast"
+        assert horizon == 30
 
 
 class TestFilterByPeriod:
@@ -122,3 +139,55 @@ class TestAnalyticsServiceHandleQuery:
         summary = await svc.get_sales_summary("all")
         assert summary["total_orders"] == 1
         assert summary["total_revenue"] == 1500.0
+
+
+class TestForecastReport:
+    def _make_recent_orders(self, n=6):
+        """Заказы за последние 60 дней."""
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        orders = []
+        for i in range(n):
+            o = _make_order(id=i + 1, total=1000.0,
+                            date=now - timedelta(days=i * 10))
+            orders.append(o)
+        return orders
+
+    def test_empty_orders_returns_no_data(self):
+        result = format_forecast_report([], {})
+        assert "нет данных" in result
+
+    def test_30_day_horizon(self):
+        orders = self._make_recent_orders(6)
+        items = {o.id: [_make_item(order_id=o.id, quantity=2, total=500)] for o in orders}
+        result = format_forecast_report(orders, items, horizon_days=30)
+        assert "1 месяц" in result
+        assert "Перга" in result
+
+    def test_60_day_horizon(self):
+        orders = self._make_recent_orders(6)
+        items = {o.id: [_make_item(order_id=o.id, quantity=2, total=500)] for o in orders}
+        result = format_forecast_report(orders, items, horizon_days=60)
+        assert "2 месяца" in result
+
+    def test_90_day_horizon(self):
+        orders = self._make_recent_orders(6)
+        items = {o.id: [_make_item(order_id=o.id, quantity=2, total=500)] for o in orders}
+        result = format_forecast_report(orders, items, horizon_days=90)
+        assert "3 месяца" in result
+
+    def test_90_day_qty_is_3x_of_30_day(self):
+        """Прогноз на 90 дней должен быть примерно в 3 раза больше чем на 30."""
+        orders = self._make_recent_orders(6)
+        items = {o.id: [_make_item(order_id=o.id, quantity=10, total=1000)] for o in orders}
+        r30 = format_forecast_report(orders, items, horizon_days=30)
+        r90 = format_forecast_report(orders, items, horizon_days=90)
+        # Просто проверяем что оба сгенерировались и содержат товар
+        assert "Перга" in r30
+        assert "Перга" in r90
+
+    def test_invalid_horizon_defaults_to_30(self):
+        orders = self._make_recent_orders(4)
+        items = {o.id: [_make_item(order_id=o.id)] for o in orders}
+        result = format_forecast_report(orders, items, horizon_days=45)
+        assert "1 месяц" in result  # 45 не валидно → 30

@@ -19,7 +19,8 @@ _PARSE_SYSTEM = (
     "Ты классификатор аналитических запросов. "
     "По тексту пользователя верни одну строку в формате:\n"
     "  period=<week|month|all>  — период анализа\n"
-    "  report=<orders|top|packaging|clients|delivery|sources|abc|seasonal|forecast|summary>  — тип отчёта\n\n"
+    "  report=<orders|top|packaging|clients|delivery|sources|abc|abc_products|seasonal|forecast|summary>  — тип отчёта\n"
+    "  horizon=<30|60|90>  — горизонт прогноза (только для forecast)\n\n"
     "Правила:\n"
     "  week  — 'неделю', 'за 7 дней', 'на этой неделе'\n"
     "  month — 'месяц', 'март', 'за 30 дней', 'в этом месяце'\n"
@@ -33,9 +34,10 @@ _PARSE_SYSTEM = (
     "  abc       — ABC-анализ клиентов, ключевые клиенты, сегменты A/B/C\n"
     "  abc_products — ABC-анализ товаров, какие товары приносят 80% выручки\n"
     "  seasonal  — сезонность, по месяцам, динамика, история продаж\n"
-    "  forecast  — прогноз, план, следующий месяц, что заготовить\n"
-    "  summary   — общая статистика или любой другой запрос\n\n"
-    "Ответь ТОЛЬКО двумя параметрами через пробел, например: period=week report=top"
+    "  forecast  — прогноз, план, следующий месяц/квартал, что заготовить\n"
+    "  summary   — общая статистика или любой другой запрос\n"
+    "  horizon: 30 — 'месяц'; 60 — 'два месяца', '60 дней'; 90 — 'квартал', '3 месяца', '90 дней'\n\n"
+    "Ответь ТОЛЬКО параметрами через пробел, например: period=all report=forecast horizon=60"
 )
 
 _VALID_REPORTS = {
@@ -49,8 +51,8 @@ _VALID_REPORTS = {
 # ---------------------------------------------------------------------------
 
 
-def _parse_analyst_query(groq_client, model: str, query: str) -> tuple[str, str]:
-    """Распознать период и тип отчёта из свободного текста через LLM."""
+def _parse_analyst_query(groq_client, model: str, query: str) -> tuple[str, str, int]:
+    """Распознать период, тип отчёта и горизонт прогноза из свободного текста через LLM."""
     try:
         resp = groq_client.chat.completions.create(
             model=model,
@@ -58,12 +60,13 @@ def _parse_analyst_query(groq_client, model: str, query: str) -> tuple[str, str]
                 {"role": "system", "content": _PARSE_SYSTEM},
                 {"role": "user", "content": query},
             ],
-            max_tokens=20,
+            max_tokens=30,
             temperature=0.0,
         )
         raw = resp.choices[0].message.content.strip()
         period = "all"
         report = "summary"
+        horizon = 30
         for part in raw.split():
             if part.startswith("period="):
                 val = part.split("=", 1)[1]
@@ -73,13 +76,20 @@ def _parse_analyst_query(groq_client, model: str, query: str) -> tuple[str, str]
                 val = part.split("=", 1)[1]
                 if val in _VALID_REPORTS:
                     report = val
-        return period, report
+            elif part.startswith("horizon="):
+                try:
+                    val = int(part.split("=", 1)[1])
+                    if val in (30, 60, 90):
+                        horizon = val
+                except ValueError:
+                    pass
+        return period, report, horizon
     except Exception as e:
         logger.warning("LLM-парсинг аналитического запроса не удался: %s", e)
-        return "all", "summary"
+        return "all", "summary", 30
 
 
-def keyword_classify(query: str) -> tuple[str, str]:
+def keyword_classify(query: str) -> tuple[str, str, int]:
     """Keyword-классификатор как fallback когда LLM недоступен."""
     q = query.lower()
 
@@ -92,6 +102,14 @@ def keyword_classify(query: str) -> tuple[str, str]:
         period = "month"
     else:
         period = "all"
+
+    # Горизонт прогноза (только для forecast)
+    if any(w in q for w in ("квартал", "3 месяца", "три месяца", "90 дней")):
+        horizon = 90
+    elif any(w in q for w in ("два месяца", "2 месяца", "60 дней")):
+        horizon = 60
+    else:
+        horizon = 30
 
     # Тип отчёта
     if any(w in q for w in ("фасов", "готовить", "упаковат", "запас")):
@@ -117,7 +135,7 @@ def keyword_classify(query: str) -> tuple[str, str]:
     else:
         report = "summary"
 
-    return period, report
+    return period, report, horizon
 
 
 def filter_by_period(orders: list, period: str) -> list:
@@ -505,59 +523,86 @@ def format_seasonal_report(orders: list, items_by_order: dict) -> str:
     return "\n".join(lines)
 
 
-def format_forecast_report(orders: list, items_by_order: dict) -> str:
-    """Прогноз спроса на следующий месяц на основе среднего за последние 3 месяца."""
+def _parse_order_date(o) -> datetime | None:
+    """Распарсить дату заказа в datetime или вернуть None при ошибке."""
+    try:
+        if isinstance(o.date, datetime):
+            return o.date
+        raw = str(o.date)
+        if "." in raw and len(raw) >= 8:
+            parts = raw.split(".")
+            return datetime(int(parts[2][:4]), int(parts[1]), int(parts[0]))
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def format_forecast_report(
+    orders: list,
+    items_by_order: dict,
+    horizon_days: int = 30,
+) -> str:
+    """Прогноз спроса на горизонт horizon_days (30/60/90) дней.
+
+    Алгоритм:
+      1. Берём заказы за последние 90 дней (3 месяца).
+      2. Группируем по месяцам → среднемесячный объём.
+      3. Умножаем на коэффициент horizon_days/30 → прогноз на горизонт.
+      4. Если данных за 3 месяца мало (<3 заказов), пробуем 6 месяцев.
+    """
     if not orders:
         return "🔮 *Прогноз спроса:* нет данных."
 
+    if horizon_days not in (30, 60, 90):
+        horizon_days = 30
+
+    horizon_label = {30: "1 месяц", 60: "2 месяца", 90: "3 месяца"}[horizon_days]
+    coeff = horizon_days / 30.0  # коэффициент масштабирования
+
     now = datetime.now()
-    three_months_ago = now - timedelta(days=90)
 
-    recent_orders = []
-    for o in orders:
-        try:
-            if isinstance(o.date, datetime):
-                dt = o.date
-            else:
-                raw = str(o.date)
-                if "." in raw and len(raw) >= 8:
-                    parts = raw.split(".")
-                    dt = datetime(int(parts[2][:4]), int(parts[1]), int(parts[0]))
-                else:
-                    dt = datetime.fromisoformat(raw)
-            if dt >= three_months_ago:
-                recent_orders.append(o)
-        except Exception:
-            continue
+    # Сначала пробуем 90 дней, при нехватке данных — 180
+    for lookback_days in (90, 180):
+        cutoff = now - timedelta(days=lookback_days)
+        recent_orders = [o for o in orders if (_parse_order_date(o) or cutoff) >= cutoff]
+        if len(recent_orders) >= 3:
+            break
+    else:
+        return "🔮 *Прогноз спроса:* недостаточно данных (менее 3 заказов за 6 месяцев)."
 
-    if not recent_orders:
-        return "🔮 *Прогноз спроса:* недостаточно данных за последние 3 месяца."
+    lookback_months = lookback_days / 30.0
 
+    # Среднемесячный товарооборот
     qty_total: Counter = Counter()
     revenue_total: defaultdict[str, float] = defaultdict(float)
     for o in recent_orders:
-        items = items_by_order.get(o.id, [])
-        for item in items:
+        for item in items_by_order.get(o.id, []):
             name = item.product_name or f"Товар #{item.product_id}"
             qty_total[name] += item.quantity
-            revenue_total[name] += item.total
+            revenue_total[name] += item.total or 0
 
     if not qty_total:
-        return "🔮 *Прогноз спроса:* нет позиций в заказах за последние 3 месяца."
+        return "🔮 *Прогноз спроса:* нет позиций в заказах."
+
+    avg_orders_per_month = len(recent_orders) / lookback_months
+    avg_revenue_per_month = sum((o.total or 0) for o in recent_orders) / lookback_months
 
     lines = [
-        "🔮 *Прогноз спроса на следующий месяц:*\n",
-        f"Основан на средних продажах за последние 3 месяца ({len(recent_orders)} заказов)\n",
+        f"🔮 *Прогноз спроса на {horizon_label}:*\n",
+        f"Основан на {len(recent_orders)} заказах за последние {lookback_days} дней\n",
         "*Рекомендуемый запас:*",
     ]
-    for name, qty in qty_total.most_common(10):
-        avg_qty = max(1, round(qty / 3))
-        avg_rev = revenue_total[name] / 3
-        lines.append(f"  • {name}: ~*{avg_qty} шт.* (~{avg_rev:,.0f} ₽/мес)")
+    for name, total_qty in qty_total.most_common(10):
+        forecast_qty = max(1, round(total_qty / lookback_months * coeff))
+        forecast_rev = revenue_total[name] / lookback_months * coeff
+        lines.append(f"  • {name}: ~*{forecast_qty} шт.* (~{forecast_rev:,.0f} ₽)")
 
-    avg_orders = round(len(recent_orders) / 3)
-    avg_revenue = sum((o.total or 0) for o in recent_orders) / 3
-    lines.append(f"\nОжидаемо заказов: ~{avg_orders}, выручка: ~{avg_revenue:,.0f} ₽")
+    forecast_orders = round(avg_orders_per_month * coeff)
+    forecast_revenue = avg_revenue_per_month * coeff
+    lines.append(
+        f"\nОжидаемо заказов: ~{forecast_orders}, "
+        f"выручка: ~{forecast_revenue:,.0f} ₽"
+    )
 
     return "\n".join(lines)
 
@@ -593,14 +638,14 @@ class AnalyticsService:
 
     async def handle_query(self, query: str) -> str:
         """Обработать свободный текстовый запрос от администратора."""
-        period, report_type = self._classify_query(query)
+        period, report_type, horizon_days = self._classify_query(query)
         orders = await self._fetch_orders(period)
 
         items_by_order: dict = {}
         if self._crm:
             items_by_order = await self._fetch_items_for_report(orders, report_type)
 
-        return self._build_report(orders, items_by_order, period, report_type)
+        return self._build_report(orders, items_by_order, period, report_type, horizon_days)
 
     async def get_sales_summary(self, period: str = "all") -> dict:
         """Получить сводку продаж за период."""
@@ -646,8 +691,8 @@ class AnalyticsService:
     # Внутренние методы
     # ------------------------------------------------------------------
 
-    def _classify_query(self, query: str) -> tuple[str, str]:
-        """Распознать период и тип отчёта."""
+    def _classify_query(self, query: str) -> tuple[str, str, int]:
+        """Распознать период, тип отчёта и горизонт прогноза."""
         if self._groq and self._model:
             return _parse_analyst_query(self._groq, self._model, query)
         return keyword_classify(query)
@@ -695,6 +740,7 @@ class AnalyticsService:
 
     def _build_report(
         self, orders: list, items_by_order: dict, period: str, report_type: str,
+        horizon_days: int = 30,
     ) -> str:
         """Сформировать текстовый отчёт нужного типа."""
         if report_type == "orders":
@@ -716,6 +762,6 @@ class AnalyticsService:
         elif report_type == "seasonal":
             return format_seasonal_report(orders, items_by_order)
         elif report_type == "forecast":
-            return format_forecast_report(orders, items_by_order)
+            return format_forecast_report(orders, items_by_order, horizon_days=horizon_days)
         else:
             return format_summary_report(orders, items_by_order, period)

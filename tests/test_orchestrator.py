@@ -1,9 +1,13 @@
 """Unit tests for src/orchestrator.py — intent classification and routing."""
 
 import time
+import tempfile
+import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
 from src.orchestrator import (
     Orchestrator,
@@ -11,6 +15,25 @@ from src.orchestrator import (
     _DIALOG_TTL_SECONDS,
     OrchestratorState,
 )
+
+
+def _make_orchestrator_with_memory() -> "Orchestrator":
+    """Создать Orchestrator с MemorySaver (быстро, без aiosqlite) для unit-тестов."""
+    with (
+        patch("src.orchestrator.Groq"),
+        patch("src.orchestrator.BeebotAgent"),
+        patch("src.orchestrator.AnalystAgent"),
+        patch("src.orchestrator.OntologyCache"),
+    ):
+        orch = Orchestrator()
+    # Подменяем lazy-init: сразу вставляем MemorySaver и собираем граф
+    orch._checkpointer = MemorySaver()
+    orch._graph = orch._build_graph()
+    # Настраиваем ontology mock: возвращать None (нет совпадений)
+    orch._ontology.match.return_value = None
+    orch._ontology.loaded = True
+    orch._ontology.get_advice_prompt.return_value = None
+    return orch
 
 
 # ---------------------------------------------------------------------------
@@ -81,13 +104,7 @@ class TestOrchestratorRouting:
 
     def _make_orchestrator(self):
         """Create Orchestrator with mocked dependencies."""
-        with (
-            patch("src.orchestrator.Groq"),
-            patch("src.orchestrator.BeebotAgent"),
-            patch("src.orchestrator.AnalystAgent"),
-        ):
-            orch = Orchestrator()
-        return orch
+        return _make_orchestrator_with_memory()
 
     @pytest.mark.asyncio
     async def test_consult_intent_routes_to_beebot(self):
@@ -166,12 +183,7 @@ class TestDialogState:
     """Tests for in-memory dialog state with TTL."""
 
     def _make_orchestrator(self):
-        with (
-            patch("src.orchestrator.Groq"),
-            patch("src.orchestrator.BeebotAgent"),
-            patch("src.orchestrator.AnalystAgent"),
-        ):
-            return Orchestrator()
+        return _make_orchestrator_with_memory()
 
     @pytest.mark.asyncio
     async def test_stores_dialog_state_after_route(self):
@@ -245,12 +257,7 @@ class TestZeroRegression:
 
     @pytest.mark.asyncio
     async def test_beebot_response_is_string(self):
-        with (
-            patch("src.orchestrator.Groq"),
-            patch("src.orchestrator.BeebotAgent"),
-            patch("src.orchestrator.AnalystAgent"),
-        ):
-            orch = Orchestrator()
+        orch = _make_orchestrator_with_memory()
 
         orch._beebot.answer = MagicMock(
             return_value=("Прополис принимают по 20 капель.", [{"source": "pdf:Прополис", "score": 0.9}])
@@ -263,3 +270,106 @@ class TestZeroRegression:
         assert isinstance(chunks, list)
         assert len(chunks) == 1
         assert chunks[0]["source"] == "pdf:Прополис"
+
+
+# ---------------------------------------------------------------------------
+# M.1: LangGraph Checkpointer — история переживает рестарт
+# ---------------------------------------------------------------------------
+
+class TestCheckpointerPersistence:
+    """История диалога сохраняется в SQLite и восстанавливается при создании нового Orchestrator."""
+
+    def _make_orchestrator(self, db_path: str) -> "Orchestrator":
+        """Создать Orchestrator с указанной SQLite базой для чекпоинтера."""
+        with (
+            patch("src.orchestrator.Groq"),
+            patch("src.orchestrator.BeebotAgent"),
+            patch("src.orchestrator.AnalystAgent"),
+            patch("src.orchestrator.OntologyCache"),
+            patch("src.orchestrator.CHECKPOINTS_DB_PATH", Path(db_path)),
+        ):
+            orch = Orchestrator()
+        return orch
+
+    @pytest.mark.asyncio
+    async def test_history_persists_between_calls(self):
+        """История диалога накапливается между вызовами route() у одного Orchestrator."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "checkpoints.db")
+            orch = self._make_orchestrator(db_path)
+            orch._beebot.answer = MagicMock(return_value=("Ответ 1", []))
+
+            with patch("src.orchestrator._classify_intent", return_value="consult"):
+                await orch.route(5001, "первый вопрос")
+
+            orch._beebot.answer = MagicMock(return_value=("Ответ 2", []))
+            with patch("src.orchestrator._classify_intent", return_value="consult"):
+                await orch.route(5001, "второй вопрос")
+
+            # Получить историю из чекпоинтера
+            config = {"configurable": {"thread_id": "5001"}}
+            saved = await orch._graph.aget_state(config)
+            history = saved.values.get("history", [])
+
+            # После двух вызовов должно быть 4 сообщения: 2 user + 2 assistant
+            assert len(history) == 4
+            assert history[0]["role"] == "user"
+            assert history[0]["content"] == "первый вопрос"
+            assert history[1]["role"] == "assistant"
+            assert history[1]["content"] == "Ответ 1"
+            assert history[2]["role"] == "user"
+            assert history[2]["content"] == "второй вопрос"
+
+    @pytest.mark.asyncio
+    async def test_history_survives_restart(self):
+        """История диалога восстанавливается после создания нового Orchestrator с тем же DB."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "checkpoints.db")
+
+            # Первый Orchestrator — первое сообщение
+            orch1 = self._make_orchestrator(db_path)
+            orch1._beebot.answer = MagicMock(return_value=("Ответ о прополисе", []))
+
+            with patch("src.orchestrator._classify_intent", return_value="consult"):
+                await orch1.route(5002, "расскажи о прополисе")
+
+            await orch1.close()
+
+            # Второй Orchestrator (симуляция рестарта) — тот же db_path
+            orch2 = self._make_orchestrator(db_path)
+            orch2._beebot.answer = MagicMock(return_value=("Ответ 2", []))
+
+            with patch("src.orchestrator._classify_intent", return_value="consult"):
+                _, _ = await orch2.route(5002, "ещё вопрос")
+
+            # История второго Orchestrator должна содержать сообщения из первого
+            config = {"configurable": {"thread_id": "5002"}}
+            saved = await orch2._graph.aget_state(config)
+            history = saved.values.get("history", [])
+
+            # Должно быть 4 сообщения: 2 из первой сессии + 2 из второй
+            assert len(history) == 4
+            assert history[0]["content"] == "расскажи о прополисе"
+            assert history[1]["content"] == "Ответ о прополисе"
+
+    @pytest.mark.asyncio
+    async def test_history_limited_to_max_pairs(self):
+        """История не должна расти бесконечно — максимум _MAX_HISTORY пар."""
+        from src.orchestrator import _MAX_HISTORY
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "checkpoints.db")
+            orch = self._make_orchestrator(db_path)
+
+            # Делаем _MAX_HISTORY + 2 вызова
+            for i in range(_MAX_HISTORY + 2):
+                orch._beebot.answer = MagicMock(return_value=(f"Ответ {i}", []))
+                with patch("src.orchestrator._classify_intent", return_value="consult"):
+                    await orch.route(5003, f"вопрос {i}")
+
+            config = {"configurable": {"thread_id": "5003"}}
+            saved = await orch._graph.aget_state(config)
+            history = saved.values.get("history", [])
+
+            # Не больше _MAX_HISTORY пар = _MAX_HISTORY * 2 сообщений
+            assert len(history) <= _MAX_HISTORY * 2

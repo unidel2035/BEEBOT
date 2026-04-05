@@ -93,6 +93,9 @@ MAX_RESPONSE_LENGTH = int(os.getenv("MAX_RESPONSE_LENGTH", "4096"))
 # Долгосрочная память (SQLite)
 MEMORY_DB_PATH = DATA_DIR / "memory.db"
 
+# LangGraph Checkpointer (SQLite) — персистентная история диалога
+CHECKPOINTS_DB_PATH = DATA_DIR / "checkpoints.db"
+
 # DEVBOT — автономный разработчик (на hive, доступен через SSH-туннель)
 # Туннель: groq-tunnel -R 8091:localhost:8091 пробрасывает VPS:8091 → hive:8091
 DEVBOT_API_URL = os.getenv("DEVBOT_API_URL", "http://localhost:8091")

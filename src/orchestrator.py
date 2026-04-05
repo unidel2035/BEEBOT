@@ -23,7 +23,7 @@ from groq import Groq
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 
-from src.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, PROCESSED_DIR, MEMORY_DB_PATH
+from src.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, PROCESSED_DIR, MEMORY_DB_PATH, CHECKPOINTS_DB_PATH
 from src.agents.beebot import BeebotAgent
 # LogistAgent убран — order intent обрабатывается в bot.py через FSM-роутер
 from src.agents.analyst import AnalystAgent
@@ -220,11 +220,34 @@ class Orchestrator:
         self._query_counter_since_save: int = 0
         self._load_faq_queries()
 
+        # LangGraph Checkpointer — персистентная история (lazy init в _ensure_checkpointer)
+        self._checkpoints_db_path = str(CHECKPOINTS_DB_PATH)
+        self._checkpointer = None  # инициализируется при первом вызове route()
+        self._db_conn = None
+
         self._graph = self._build_graph()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def _ensure_checkpointer(self) -> None:
+        """Lazy init: создать AsyncSqliteSaver при первом вызове route()."""
+        if self._checkpointer is None:
+            import aiosqlite
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            self._db_conn = await aiosqlite.connect(self._checkpoints_db_path)
+            self._checkpointer = AsyncSqliteSaver(self._db_conn)
+            await self._checkpointer.setup()
+            # Перестроить граф с чекпоинтером
+            self._graph = self._build_graph()
+
+    async def close(self) -> None:
+        """Закрыть соединение с БД чекпоинтера (вызывать при shutdown)."""
+        if self._db_conn:
+            await self._db_conn.close()
+            self._db_conn = None
+            self._checkpointer = None
 
     def set_crm_agent(self, crm_agent) -> None:
         """Инжектировать CrmAgent после создания IntegramClient (вызывается из bot.py)."""
@@ -254,10 +277,13 @@ class Orchestrator:
         Returns:
             (response_text, chunks) — chunks пустой если агент не BEEBOT.
         """
+        await self._ensure_checkpointer()
         self._evict_stale_states()
 
-        # Передать историю диалога из SharedContext
-        history = self._shared_ctx.get(user_id).get_history()
+        # Восстановить историю из чекпоинтера (SQLite — переживает рестарт)
+        config: dict = {"configurable": {"thread_id": str(user_id)}}
+        saved = await self._graph.aget_state(config)
+        history: list[dict] = saved.values.get("history", []) if saved.values else []
 
         initial_state: OrchestratorState = {
             "user_id": user_id,
@@ -270,9 +296,9 @@ class Orchestrator:
             "user_name": user_name,
         }
 
-        result = await self._graph.ainvoke(initial_state)
+        result = await self._graph.ainvoke(initial_state, config=config)
 
-        # Persist dialog state
+        # Persist dialog state (для get_intent совместимости)
         self._dialog_states[user_id] = DialogState(
             user_id=user_id,
             query=query,
@@ -282,9 +308,8 @@ class Orchestrator:
             updated_at=time.monotonic(),
         )
 
-        # Сохранить в SharedContext историю + FAQ-счётчик (только для consult)
+        # FAQ-счётчик (только для consult)
         if result["intent"] == "consult" and result["response"]:
-            self._shared_ctx.get(user_id).append_history(query, result["response"])
             self._track_query(query)
 
         return result["response"], result["chunks"]
@@ -327,7 +352,7 @@ class Orchestrator:
         graph.add_edge("analyst", END)
         graph.add_edge("greeting", END)
 
-        return graph.compile()
+        return graph.compile(checkpointer=self._checkpointer)
 
     # ------------------------------------------------------------------
     # Graph nodes
@@ -409,7 +434,14 @@ class Orchestrator:
                     except Exception as _e:
                         logger.debug("Профиль здоровья: не удалось записать в Integram: %s", _e)
 
-        return {**state, "response": response, "chunks": chunks}
+        # Обновить историю внутри состояния (checkpointer сохранит автоматически)
+        history = list(state.get("history") or [])
+        history.append({"role": "user", "content": query})
+        history.append({"role": "assistant", "content": response})
+        if len(history) > _MAX_HISTORY * 2:
+            history = history[-_MAX_HISTORY * 2:]
+
+        return {**state, "response": response, "chunks": chunks, "history": history}
 
     async def _node_analyst(self, state: OrchestratorState) -> OrchestratorState:
         """Маршрут: stats → Аналитик."""

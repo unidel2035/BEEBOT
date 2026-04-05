@@ -104,6 +104,112 @@ class DashboardService:
         }
 
     # ------------------------------------------------------------------
+    # Прогноз спроса
+    # ------------------------------------------------------------------
+
+    async def get_forecast(self, horizon_days: int = 30) -> dict[str, Any]:
+        """Прогноз выручки и топ-товаров на горизонт horizon_days (30/60/90).
+
+        Возвращает структуру для Chart.js line chart:
+          {
+            "horizon_days": 30,
+            "labels": ["Апр 26", "Май 26", "Июн 26"],   # последние 6 мес + прогнозные
+            "actual": [12000, 15000, ...],               # фактические данные
+            "forecast": [null, ..., null, 16000, 17000], # null для прошлого, значения — прогноз
+            "products": [{"name": "Прополис", "forecast_qty": 12}],
+          }
+        """
+        if not self._crm:
+            return {"horizon_days": horizon_days, "labels": [], "actual": [], "forecast": [], "products": []}
+
+        if horizon_days not in (30, 60, 90):
+            horizon_days = 30
+        forecast_months = horizon_days // 30  # 1, 2 или 3
+
+        now = datetime.now(tz=timezone.utc)
+        lookback_cutoff = now - timedelta(days=180)  # 6 месяцев истории
+
+        all_orders = await self._crm.get_orders()
+        recent_orders = [
+            o for o in all_orders
+            if o.date and o.date.replace(tzinfo=timezone.utc) >= lookback_cutoff
+        ]
+
+        # Агрегируем по месяцам
+        monthly_revenue: dict[str, float] = defaultdict(float)
+        monthly_count: dict[str, int] = defaultdict(int)
+        for o in recent_orders:
+            if o.date and 2024 <= o.date.year <= 2030:
+                mk = f"{o.date.year}-{o.date.month:02d}"
+                monthly_revenue[mk] += o.total or 0
+                monthly_count[mk] += 1
+
+        # Последние 3 полных месяца для расчёта среднего
+        current_month_key = f"{now.year}-{now.month:02d}"
+        past_months = sorted(k for k in monthly_revenue if k < current_month_key)[-3:]
+        if not past_months:
+            # Нет данных → 0-прогноз
+            return {"horizon_days": horizon_days, "labels": [], "actual": [], "forecast": [], "products": []}
+
+        avg_revenue = sum(monthly_revenue[m] for m in past_months) / len(past_months)
+
+        # История: последние 6 месяцев (или меньше если данных нет)
+        history_months = sorted(monthly_revenue.keys())[-6:]
+
+        # Прогнозные месяцы: следующие forecast_months после текущего
+        next_months = []
+        yr, mo = now.year, now.month
+        for _ in range(forecast_months):
+            mo += 1
+            if mo > 12:
+                mo = 1
+                yr += 1
+            next_months.append(f"{yr}-{mo:02d}")
+
+        all_labels_keys = history_months + next_months
+
+        def _label(mk: str) -> str:
+            year, month = mk.split("-")
+            return f"{_MONTH_NAMES.get(int(month), month)} {year[-2:]}"
+
+        labels = [_label(m) for m in all_labels_keys]
+        n_hist = len(history_months)
+
+        actual = [round(monthly_revenue.get(m, 0), 0) for m in history_months]
+        # forecast: null для исторических, прогноз для будущих
+        forecast = [None] * n_hist + [round(avg_revenue, 0)] * forecast_months
+
+        # Товарный прогноз (топ-5 по кол-ву в последние 3 мес)
+        products: list[dict] = []
+        try:
+            all_items = await self._crm.get_order_items_bulk()
+            past_order_ids = {
+                o.id for o in recent_orders
+                if o.date and f"{o.date.year}-{o.date.month:02d}" in past_months
+            }
+            from collections import Counter
+            qty_counter: Counter = Counter()
+            for item in all_items:
+                if item.order_id in past_order_ids:
+                    name = item.product_name or f"Товар #{item.product_id}"
+                    qty_counter[name] += item.quantity or 0
+            avg_period = len(past_months)
+            products = [
+                {"name": name, "forecast_qty": max(1, round(qty / avg_period * forecast_months))}
+                for name, qty in qty_counter.most_common(5)
+            ]
+        except Exception:
+            pass
+
+        return {
+            "horizon_days": horizon_days,
+            "labels": labels,
+            "actual": actual,
+            "forecast": forecast,
+            "products": products,
+        }
+
+    # ------------------------------------------------------------------
     # Алерты
     # ------------------------------------------------------------------
 

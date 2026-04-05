@@ -19,6 +19,7 @@ from src.services.analytics_service import (  # noqa: F401
     format_delivery_report,
     format_sources_report,
     format_abc_report,
+    format_abc_products_report,
     format_seasonal_report,
     format_forecast_report,
     format_summary_report,

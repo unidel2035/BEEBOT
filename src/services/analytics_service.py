@@ -31,6 +31,7 @@ _PARSE_SYSTEM = (
     "  delivery  — способы доставки, СДЭК, Почта\n"
     "  sources   — откуда заказы, источники, каналы, Telegram, UDS\n"
     "  abc       — ABC-анализ клиентов, ключевые клиенты, сегменты A/B/C\n"
+    "  abc_products — ABC-анализ товаров, какие товары приносят 80% выручки\n"
     "  seasonal  — сезонность, по месяцам, динамика, история продаж\n"
     "  forecast  — прогноз, план, следующий месяц, что заготовить\n"
     "  summary   — общая статистика или любой другой запрос\n\n"
@@ -39,7 +40,7 @@ _PARSE_SYSTEM = (
 
 _VALID_REPORTS = {
     "orders", "top", "packaging", "clients", "delivery", "sources",
-    "abc", "seasonal", "forecast", "summary",
+    "abc", "abc_products", "seasonal", "forecast", "summary",
 }
 
 
@@ -97,6 +98,8 @@ def keyword_classify(query: str) -> tuple[str, str]:
         report = "packaging"
     elif any(w in q for w in ("прогноз", "следующий месяц", "план на", "что заготов")):
         report = "forecast"
+    elif any(w in q for w in ("abc товар", "а б ц товар", "какие товары приносят", "товары сегмент")):
+        report = "abc_products"
     elif any(w in q for w in ("abc", "а б ц", "ключевые клиент", "сегмент")):
         report = "abc"
     elif any(w in q for w in ("сезон", "по месяцам", "ежемесячно", "динамика", "история продаж")):
@@ -386,6 +389,62 @@ def format_abc_report(orders: list, items_by_order: dict, period: str) -> str:
     return "\n".join(lines).rstrip()
 
 
+def format_abc_products_report(orders: list, items_by_order: dict, period: str) -> str:
+    """ABC-анализ товаров: A = 80% выручки, B = 80–95%, C = 95–100%."""
+    label = _period_label(period)
+    if not orders:
+        return f"🔢 *ABC-анализ товаров {label}:* нет данных."
+
+    product_revenue: defaultdict[str, float] = defaultdict(float)
+    product_qty: defaultdict[str, int] = defaultdict(int)
+    for o in orders:
+        for item in items_by_order.get(o.id, []):
+            name = item.product_name or f"Товар #{item.product_id}"
+            product_revenue[name] += item.total or 0
+            product_qty[name] += item.quantity
+
+    if not product_revenue:
+        return f"🔢 *ABC-анализ товаров {label}:* нет позиций в заказах."
+
+    total_rev = sum(product_revenue.values())
+    sorted_products = sorted(product_revenue.items(), key=lambda x: x[1], reverse=True)
+
+    segments: dict[str, list] = {"A": [], "B": [], "C": []}
+    cumulative = 0.0
+    for name, rev in sorted_products:
+        cumulative += rev / total_rev * 100 if total_rev else 0
+        seg = "A" if cumulative <= 80 else ("B" if cumulative <= 95 else "C")
+        segments[seg].append((name, rev))
+
+    lines = [
+        f"🔢 *ABC-анализ товаров {label}:*\n",
+        f"Всего товаров: {len(sorted_products)}, выручка: {total_rev:,.0f} ₽\n",
+    ]
+    seg_labels = {
+        "A": ("🥇", "Лидеры", "до 80% выручки"),
+        "B": ("🥈", "Средние", "80–95% выручки"),
+        "C": ("🥉", "Аутсайдеры", "95–100% выручки"),
+    }
+    for seg, (emoji, title, desc) in seg_labels.items():
+        products = segments[seg]
+        if not products:
+            continue
+        seg_rev = sum(r for _, r in products)
+        seg_pct = seg_rev / total_rev * 100 if total_rev else 0
+        lines.append(
+            f"{emoji} *Сегмент {seg} — {title}* ({desc}): "
+            f"{len(products)} товар., {seg_rev:,.0f} ₽ ({seg_pct:.0f}%)"
+        )
+        for name, rev in products[:5]:
+            qty = product_qty[name]
+            lines.append(f"  • {name} — {rev:,.0f} ₽ ({qty} шт.)")
+        if len(products) > 5:
+            lines.append(f"  ... и ещё {len(products) - 5}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
 def format_seasonal_report(orders: list, items_by_order: dict) -> str:
     """Сезонная аналитика — продажи по месяцам."""
     if not orders:
@@ -609,7 +668,7 @@ class AnalyticsService:
 
     async def _fetch_items_for_report(self, orders: list, report_type: str) -> dict:
         """Загрузить позиции только если нужны для данного типа отчёта."""
-        needs_items = {"top", "packaging", "summary", "abc", "seasonal", "forecast"}
+        needs_items = {"top", "packaging", "summary", "abc", "abc_products", "seasonal", "forecast"}
         if report_type not in needs_items:
             return {}
         return await self._fetch_items(orders)
@@ -652,6 +711,8 @@ class AnalyticsService:
             return format_sources_report(orders, period)
         elif report_type == "abc":
             return format_abc_report(orders, items_by_order, period)
+        elif report_type == "abc_products":
+            return format_abc_products_report(orders, items_by_order, period)
         elif report_type == "seasonal":
             return format_seasonal_report(orders, items_by_order)
         elif report_type == "forecast":

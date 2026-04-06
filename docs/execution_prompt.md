@@ -17,10 +17,19 @@ GitHub upstream: alekseymavai/BEEBOT (push через fork unidel2035/BEEBOT)
 ```
 
 **Обязательно в начале сессии:**
-1. Прочитать `plan.md` — найти первую незавершённую задачу
-2. Прочитать `analysis.md` — понять контекст и риски
-3. Прочитать файлы, которые будут изменяться (`Read` перед `Edit`)
-4. Проверить текущую ветку: `git status && git branch`
+1. Прочитать `docs/memory/MEMORY.md` — индекс памяти команды
+2. Прочитать `docs/memory/state.md` — текущее состояние, что нельзя трогать
+3. Прочитать `plan.md` — найти первую незавершённую задачу
+4. Прочитать `analysis.md` — понять контекст и риски
+5. Прочитать файлы, которые будут изменяться (`Read` перед `Edit`)
+6. Проверить текущую ветку: `git status && git branch`
+
+**Документация команды:**
+- `docs/team.md` — состав команды, пайплайн, роли
+- `docs/agents/<role>.md` — договор каждого агента (Scout→Architect→Dev→QA→Security→DevOps→TechWriter)
+- `docs/memory/antipatterns.md` — что нельзя делать и почему
+- `docs/memory/fragile_zones.md` — хрупкие файлы с повышенным риском
+- `docs/memory/decisions.md` — принятые архитектурные решения (ADR)
 
 ---
 

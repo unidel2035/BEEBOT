@@ -83,6 +83,14 @@ class MemoryService:
             )
         return added
 
+    def clear_facts(self, user_id: int) -> int:
+        """Удалить все факты пользователя. Возвращает кол-во удалённых."""
+        return self._memory.clear_facts(user_id)
+
+    def count_facts(self, user_id: int) -> int:
+        """Количество сохранённых фактов о пользователе."""
+        return self._memory.count_facts(user_id)
+
     # ------------------------------------------------------------------
     # Episodes
     # ------------------------------------------------------------------

@@ -117,7 +117,7 @@ ssh ai-agent@185.233.200.13 "docker logs --tail 30 beebot"
 | M.2 | agent_id namespace | Добавить поле agent_id в user_memory. Каждый агент видит только свои факты | memory.py | ✅
 | M.3 | Таблица episodes | CREATE TABLE episodes(user_id, agent_id, event_type, summary, detail, created_at) | memory.py | ✅
 | M.4 | MemoryService | Единый API для всех агентов. Агент не знает о хранилище | memory_service.py | ✅
-| M.5 | AgentContext | Передавать unified context в оркестратор: profile+episodes+crm_snapshot | orchestrator.py |
+| M.5 | AgentContext | Передавать unified context в оркестратор: profile+episodes+crm_snapshot | orchestrator.py | ✅
 | M.6 | Sync → Integram | Ежесуточный бэкап episodes и user_facts в Integram | memory_service.py |
 
 **Источники:** docs/memory_architecture.md (детальный анализ best practices 2025)

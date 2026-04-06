@@ -1,4 +1,4 @@
-"""Tests for src/memory_service.py — MemoryService (M.4)."""
+"""Tests for src/memory_service.py — MemoryService (M.4 + M.5)."""
 
 import tempfile
 from pathlib import Path
@@ -145,3 +145,35 @@ class TestGetUserContext:
         assert len(ctx["facts"]) == 1
         assert len(ctx["episodes"]) == 1
         assert ctx["episodes"][0]["agent_id"] == "beebot"
+
+
+# ---------------------------------------------------------------------------
+# M.5: clear_facts / count_facts (нужны для admin.py)
+# ---------------------------------------------------------------------------
+
+class TestClearAndCount:
+    def test_count_facts_empty(self, svc):
+        assert svc.count_facts(9001) == 0
+
+    def test_count_facts_after_add(self, svc):
+        svc.add_fact(9002, "факт 1")
+        svc.add_fact(9002, "факт 2")
+        assert svc.count_facts(9002) == 2
+
+    def test_clear_facts_returns_count(self, svc):
+        svc.add_fact(9003, "факт 1")
+        svc.add_fact(9003, "факт 2")
+        removed = svc.clear_facts(9003)
+        assert removed == 2
+
+    def test_clear_facts_empties_storage(self, svc):
+        svc.add_fact(9004, "факт 1")
+        svc.clear_facts(9004)
+        assert svc.count_facts(9004) == 0
+
+    def test_clear_facts_isolation(self, svc):
+        """clear_facts удаляет только данные указанного пользователя."""
+        svc.add_fact(9005, "факт пользователя A")
+        svc.add_fact(9006, "факт пользователя B")
+        svc.clear_facts(9005)
+        assert svc.count_facts(9006) == 1

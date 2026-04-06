@@ -87,7 +87,7 @@ def setup_routers(svc: Services) -> None:
     """
     setup_admin(
         bot, crm=svc.crm, kb=svc.kb,
-        memory=svc.orchestrator._memory, auth=svc.auth,
+        memory=svc.orchestrator._memory_svc, auth=svc.auth,
     )
     setup_inspect(svc.inspector)
     setup_fsm_order(svc.logist, bot)

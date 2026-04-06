@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.crm_agent import CrmAgent
-    from src.memory import UserMemory
+    from src.memory_service import MemoryService
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class AnamnesisCache:
     """Кэш значимых прошлых взаимодействий на user_id."""
 
-    def __init__(self, memory: "UserMemory") -> None:
+    def __init__(self, memory: "MemoryService") -> None:
         self._memory = memory
 
     async def get(

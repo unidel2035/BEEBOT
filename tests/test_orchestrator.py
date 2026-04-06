@@ -373,3 +373,38 @@ class TestCheckpointerPersistence:
 
             # Не больше _MAX_HISTORY пар = _MAX_HISTORY * 2 сообщений
             assert len(history) <= _MAX_HISTORY * 2
+
+
+# ---------------------------------------------------------------------------
+# M.5: Orchestrator uses MemoryService, not UserMemory directly
+# ---------------------------------------------------------------------------
+
+class TestOrchestratorUsesMemoryService:
+    def test_orchestrator_has_memory_svc_not_memory(self):
+        """После M.5 оркестратор должен иметь _memory_svc, а не _memory."""
+        orch = _make_orchestrator_with_memory()
+        assert hasattr(orch, "_memory_svc"), "_memory_svc должен существовать"
+        assert not hasattr(orch, "_memory"), "_memory (UserMemory) не должен быть напрямую"
+
+    def test_memory_svc_has_get_user_context(self):
+        """_memory_svc должен поддерживать get_user_context()."""
+        orch = _make_orchestrator_with_memory()
+        assert hasattr(orch._memory_svc, "get_user_context")
+
+    @pytest.mark.asyncio
+    async def test_fact_saved_via_memory_svc_on_health_mention(self):
+        """При упоминании здоровья факт сохраняется через _memory_svc."""
+        import tempfile, os
+        from unittest.mock import MagicMock, AsyncMock, patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "checkpoints.db")
+            orch = _make_orchestrator_with_memory()
+            orch._checkpoints_db_path = db_path
+
+            orch._beebot.answer = MagicMock(return_value=("Ответ", []))
+            with patch("src.orchestrator._classify_intent", return_value="consult"):
+                await orch.route(7001, "у меня язва желудка уже 3 года")
+
+            facts = orch._memory_svc.get_facts(7001)
+            assert any("язва" in f for f in facts)

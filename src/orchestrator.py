@@ -23,11 +23,12 @@ from groq import Groq
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 
-from src.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, PROCESSED_DIR, MEMORY_DB_PATH, CHECKPOINTS_DB_PATH
+from src.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, PROCESSED_DIR, CHECKPOINTS_DB_PATH
 from src.agents.beebot import BeebotAgent
 # LogistAgent убран — order intent обрабатывается в bot.py через FSM-роутер
 from src.agents.analyst import AnalystAgent
-from src.memory import UserMemory, extract_fact
+from src.memory import extract_fact
+from src.memory_service import get_memory_service
 from src.ontology import OntologyCache
 from src.shared_context import SharedContextStore
 from src.anamnesis import AnamnesisCache
@@ -194,8 +195,8 @@ class Orchestrator:
         self._beebot = BeebotAgent()
         self._analyst = AnalystAgent(groq_client=self._groq, groq_model=self._model)
 
-        # Долгосрочная память пользователей (SQLite)
-        self._memory = UserMemory(MEMORY_DB_PATH)
+        # Долгосрочная память пользователей (через MemoryService, M.5)
+        self._memory_svc = get_memory_service()
 
         # Онтология: Симптомы → Показания к применению (из Integram)
         self._ontology = OntologyCache()
@@ -204,7 +205,7 @@ class Orchestrator:
         self._shared_ctx = SharedContextStore()
 
         # AnamnesisCache — эпизодическая память (Фаза 10.1)
-        self._anamnesis = AnamnesisCache(self._memory)
+        self._anamnesis = AnamnesisCache(self._memory_svc)
 
         # CrmAgent — инжектируется из bot.py после создания IntegramClient (Фаза 9.2)
         self._crm_agent = None  # Optional[CrmAgent]
@@ -384,8 +385,8 @@ class Orchestrator:
         if not self._ontology.loaded:
             await self._ontology.load()
 
-        # Долгосрочная память пользователя (SQLite)
-        memory_facts: list[str] = list(self._memory.get_facts(user_id))
+        # Долгосрочная память пользователя (через MemoryService, M.5)
+        memory_facts: list[str] = list(self._memory_svc.get_facts(user_id))
 
         # Онтологическая рекомендация по симптому (из Integram)
         onto_hint = self._ontology.match(query)
@@ -420,7 +421,7 @@ class Orchestrator:
         fact_result = extract_fact(query)
         if fact_result:
             fact_text, category = fact_result
-            added = self._memory.add_fact(user_id, fact_text, category=category, source="auto")
+            added = self._memory_svc.add_fact(user_id, fact_text, category=category, source="auto", agent_id="beebot")
             # Дублировать health-факт в CrmAgent → Integram (Фаза 9.2)
             if added and category == "health":
                 if self._crm_agent:

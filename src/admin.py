@@ -23,7 +23,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from src.integram_client import IntegramClient, IntegramError, IntegramNotFoundError
 from src.services.auth_service import AuthService
 from src.knowledge_base import KnowledgeBase
-from src.memory import UserMemory
+from src.memory_service import MemoryService
 from src.notifications import Notifier
 from src.web.notifications import notify_client_status_change, notify_beekeeper_status_change
 
@@ -39,7 +39,7 @@ _crm: Optional[IntegramClient] = None
 _notifier: Optional[Notifier] = None
 _bot: Optional[Bot] = None
 _kb: Optional[KnowledgeBase] = None
-_mem: Optional[UserMemory] = None
+_mem: Optional[MemoryService] = None
 _auth: Optional[AuthService] = None
 
 
@@ -47,7 +47,7 @@ def setup_admin(
     bot: Bot,
     crm: Optional[IntegramClient] = None,
     kb: Optional[KnowledgeBase] = None,
-    memory: Optional[UserMemory] = None,
+    memory: Optional[MemoryService] = None,
     auth: Optional[AuthService] = None,
 ) -> None:
     """Инициализировать админ-модуль с зависимостями."""
